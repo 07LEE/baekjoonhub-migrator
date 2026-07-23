@@ -1,0 +1,14 @@
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Temporary test directories
+scratch_git_test/
+*.tmp
+
+# IDE settings
+.vscode/
+.idea/

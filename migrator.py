@@ -11,7 +11,18 @@ import re
 import sys
 import subprocess
 import argparse
+import tempfile
+import shutil
 from typing import Dict, List, Tuple, Optional
+
+
+def is_remote_url(path: str) -> bool:
+    """Check if the provided path is a remote Git repository URL.
+
+    Supports HTTP, HTTPS, SSH, and git protocols.
+    """
+    return path.startswith(('http://', 'https://', 'git@', 'ssh://'))
+
 
 # Reconfigure stdout and stderr to handle UTF-8 and special unicode characters (like \u2005) on Windows
 if hasattr(sys.stdout, 'reconfigure'):
@@ -146,10 +157,6 @@ class PathMapper:
         else:
             # Unrecognized pattern, return unchanged
             return path
-
-
-
-
         # Normalize Programmers level folders to strictly match BaekjoonHub's actual behavior (e.g., 'lv1' -> '1')
         if platform == '프로그래머스' and rel_path_parts:
             level_dir = rel_path_parts[0]
@@ -158,17 +165,12 @@ class PathMapper:
                 if digits.isdigit():
                     rel_path_parts[0] = digits
 
-
         if mode == 'platform_first':
             # Format: <Platform>/<Remaining_Path>
             new_parts = [platform] + rel_path_parts
         elif mode == 'language_first':
             # Format: <Language>/<Platform>/<Remaining_Path>
             new_parts = [lang, platform] + rel_path_parts
-        elif mode == 'flat':
-            # Simplifies folder names by removing invisible spaces or extra nesting
-            clean_rel_parts = [re.sub(r'[\u2000-\u200f\u205f\u3000]', '', p) for p in rel_path_parts]
-            new_parts = [platform] + clean_rel_parts
         else:
             new_parts = parts
 
@@ -430,13 +432,13 @@ def main():
         '--repo',
         type=str,
         default=os.getcwd(),
-        help="Path to the target Git repository (default: current directory)"
+        help="Path or remote URL to the target Git repository (default: current directory)"
     )
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['platform_first', 'language_first', 'flat'],
-        help="Migration mode: 'platform_first', 'language_first', or 'flat'"
+        choices=['platform_first', 'language_first'],
+        help="Migration mode: 'platform_first' or 'language_first'"
     )
     parser.add_argument(
         '--dry-run',
@@ -446,47 +448,94 @@ def main():
 
     args = parser.parse_args()
 
-    repo_dir = os.path.abspath(args.repo)
-    if not os.path.exists(os.path.join(repo_dir, '.git')):
-        print(f"[*] Note: '{repo_dir}' is not a Git repository.")
-        user_repo = input("Please enter the path to target Git repository: ").strip().strip('"').strip("'")
-        if user_repo:
-            repo_dir = os.path.abspath(user_repo)
+    repo_input = args.repo
+    is_remote = False
 
-    if not os.path.exists(os.path.join(repo_dir, '.git')):
+    if is_remote_url(repo_input):
+        is_remote = True
+    else:
+        repo_dir = os.path.abspath(repo_input)
+        if not os.path.exists(os.path.join(repo_dir, '.git')):
+            print(f"[*] Note: '{repo_dir}' is not a Git repository.")
+            user_repo = input("Please enter the path or URL to target Git repository: ").strip().strip('"').strip("'")
+            if user_repo:
+                if is_remote_url(user_repo):
+                    is_remote = True
+                    repo_input = user_repo
+                else:
+                    repo_dir = os.path.abspath(user_repo)
+
+    if not is_remote and not os.path.exists(os.path.join(repo_dir, '.git')):
         print(f"[-] Error: '{repo_dir}' is not a valid Git repository.")
         sys.exit(1)
 
+    temp_dir_obj = None
+    if is_remote:
+        print(f"[+] Cloning remote repository from '{repo_input}'...")
+        try:
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix='bjhub_migrator_')
+            repo_dir = temp_dir_obj.name
+            subprocess.run(['git', 'clone', repo_input, repo_dir], check=True)
+            print("[+] Clone successfully completed.")
+        except Exception as e:
+            print(f"[-] Failed to clone remote repository: {e}")
+            if temp_dir_obj:
+                temp_dir_obj.cleanup()
+            sys.exit(1)
 
-    rewriter = GitRewriter(repo_dir)
+    try:
+        rewriter = GitRewriter(repo_dir)
 
-    # Interactive mode if arguments are missing
-    selected_mode = args.mode
-    if not selected_mode:
-        print("=" * 60)
-        print(" BaekjoonHub Migration Tool ")
-        print("=" * 60)
-        print("Select target migration layout:")
-        print("  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)")
-        print("  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)")
-        print("  3. Flat custom (Clean invisible space characters)")
-        print("=" * 60)
+        # Interactive mode if arguments are missing
+        selected_mode = args.mode
+        if not selected_mode:
+            print("=" * 60)
+            print(" BaekjoonHub Migration Tool ")
+            print("=" * 60)
+            print("Select target migration layout:")
+            print("  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)")
+            print("  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)")
+            print("=" * 60)
 
-        choice = input("Enter choice (1-3): ").strip()
-        mode_map = {'1': 'platform_first', '2': 'language_first', '3': 'flat'}
-        selected_mode = mode_map.get(choice, 'platform_first')
+            choice = input("Enter choice (1-2): ").strip()
+            mode_map = {'1': 'platform_first', '2': 'language_first'}
+            selected_mode = mode_map.get(choice, 'platform_first')
 
-    if args.dry_run:
+        if args.dry_run:
+            rewriter.preview_migration(selected_mode)
+            return
+
+        # Interactive confirmation if dry-run wasn't specified via CLI
         rewriter.preview_migration(selected_mode)
-        return
+        confirm = input("Do you want to proceed with rewriting Git history? (y/N): ").strip().lower()
+        if confirm == 'y':
+            rewriter.execute_rewrite(selected_mode)
+            
+            if is_remote:
+                print("\n" + "=" * 60)
+                print(" REMOTE PUSH CONFIRMATION")
+                print("=" * 60)
+                print("WARNING: Force pushing will overwrite the remote repository history.")
+                push_confirm = input("Do you want to force push the changes to remote? (y/N): ").strip().lower()
+                if push_confirm == 'y':
+                    try:
+                        current_branch = rewriter._run_git(['rev-parse', '--abbrev-ref', 'HEAD']).strip()
+                        print(f"[+] Force pushing rewritten branch '{current_branch}' to origin...")
+                        rewriter._run_git(['push', '-f', 'origin', current_branch])
+                        print("[+] Push completed successfully!")
+                    except Exception as e:
+                        print(f"[-] Failed to push to remote: {e}")
+                else:
+                    print("[-] Force push cancelled. Migrated repository remains in temporary directory:")
+                    print(f"    {repo_dir}")
+                    print("    (Note: This directory will be deleted when program exits)")
+        else:
+            print("[-] Operation cancelled by user.")
 
-    # Interactive confirmation if dry-run wasn't specified via CLI
-    rewriter.preview_migration(selected_mode)
-    confirm = input("Do you want to proceed with rewriting Git history? (y/N): ").strip().lower()
-    if confirm == 'y':
-        rewriter.execute_rewrite(selected_mode)
-    else:
-        print("[-] Operation cancelled by user.")
+    finally:
+        if temp_dir_obj:
+            print("[+] Cleaning up temporary directory...")
+            temp_dir_obj.cleanup()
 
 
 if __name__ == '__main__':

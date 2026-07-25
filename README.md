@@ -14,7 +14,6 @@
 2. 다양한 통합 디렉토리 레이아웃 지원
    - 플랫폼 중심 (Platform-first): `백준/...`, `프로그래머스/...`, `SWEA/...`로 흡수 통합
    - 언어 중심 (Language-first): `Python3/백준/...`, `Java/프로그래머스/...`로 통합
-   - 특수문자 정돈 (Flat Custom): 백준허브 고유의 특수 공백(`\u2005`) 및 불필요한 이중 폴더 정돈
 
 3. 프로그래머스 난이도 폴더명 백준허브 실제 표준(숫자 0, 1, 2, 3)으로 통합
    - BaekjoonHub 확장 프로그램의 실제 동작 규격인 단순 숫자 형태(`0`, `1`, `2`, `3`, `unrated`)로 100% 일치시켜 통일합니다.
@@ -25,33 +24,49 @@
 
 ## 사용법
 
+로컬 저장소 경로 외에 GitHub 등 원격 저장소 URL을 직접 지정하여 마이그레이션을 실행할 수도 있습니다. 원격 저장소를 지정할 경우, 자동으로 임시 폴더에 프로젝트를 복제하여 마이그레이션을 처리한 뒤 원격지에 강제 푸시할지 여부를 묻습니다.
+
 ### 1. 미리보기 (Dry-Run 모드)
+
 실제 Git 히스토리를 변경하기 전에 어떤 파일이 어떻게 이동하는지 확인합니다.
+
+로컬 저장소:
 
 ```bash
 python migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
 ```
 
+원격 저장소:
+
+```bash
+python migrator.py --repo <원격 저장소 URL> --mode platform_first --dry-run
+```
+
 ### 2. 마이그레이션 실행
+
 대화형 메뉴에서 모드를 선택하고 실행합니다.
+
+로컬 저장소:
 
 ```bash
 python migrator.py --repo /path/to/your/repository
 ```
 
-정상 완료 시 콘솔에 아래와 같은 성공 안내 메시지가 출력됩니다.
+원격 저장소:
 
-```text
-[+] Migration successfully finished! Branch 'main' (or 'master') now points to rewritten history.
-[+] Original history backed up in 'backup-before-migration'.
+```bash
+python migrator.py --repo <원격 저장소 URL>
 ```
 
 ### 3. GitHub 등 원격 리포지토리에 반영 (선택 사항)
+
 Git 히스토리가 재작성되었으므로 원격 리포지토리(GitHub)에 반영할 때는 강제 푸시(`force push`)를 수행해야 합니다.
 
 ```bash
 git push origin main --force
 ```
+
+원격 저장소 URL로 실행한 경우에는 마이그레이션 완료 단계에서 나타나는 강제 푸시 확인 프롬프트(`y/N`)를 통해 자동으로 원격지에 반영되므로 이 단계를 건너뜁니다.
 
 > [!CAUTION]
 > 강제 푸시는 원격 리포지토리의 커밋 히스토리를 덮어씁니다. 마이그레이션 결과가 만족스러운지 local에서 충분히 확인한 후 진행하세요.

@@ -1,0 +1,57 @@
+name: Build and Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} Binary
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: baekjoonhub-migrator-linux
+            bin_path: build/baekjoonhub-migrator
+          - os: windows-latest
+            asset_name: baekjoonhub-migrator-windows.exe
+            bin_path: build/Release/baekjoonhub-migrator.exe
+          - os: macos-latest
+            asset_name: baekjoonhub-migrator-macos
+            bin_path: build/baekjoonhub-migrator
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Prepare Binary Artifact
+        run: |
+          if [ -f "${{ matrix.bin_path }}" ]; then
+            cp "${{ matrix.bin_path }}" "${{ matrix.asset_name }}"
+          else
+            find build -name "baekjoonhub-migrator*" -type f
+            cp $(find build -name "baekjoonhub-migrator*" -type f | head -n 1) "${{ matrix.asset_name }}"
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: ${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -5,6 +5,14 @@ __pycache__/
 *.pyd
 .pytest_cache/
 
+# C++ & CMake build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.exe
+
 # Temporary test directories
 scratch_git_test/
 *.tmp

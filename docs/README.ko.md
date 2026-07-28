@@ -58,12 +58,12 @@ Python 3 환경에서 스크립트를 직접 실행합니다.
 
 #### 미리보기 (Dry-Run 모드)
 ```bash
-python3 migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
+python3 src/migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
 ```
 
 #### 마이그레이션 실행
 ```bash
-python3 migrator.py --repo /path/to/your/repository
+python3 src/migrator.py --repo /path/to/your/repository
 ```
 
 ### 3. 원격 리포지토리 반영

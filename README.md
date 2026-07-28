@@ -58,12 +58,12 @@ Run directly with Python 3 environment.
 
 Preview Changes (Dry-Run Mode):
 ```bash
-python3 migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
+python3 src/migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
 ```
 
 Run Migration:
 ```bash
-python3 migrator.py --repo /path/to/your/repository
+python3 src/migrator.py --repo /path/to/your/repository
 ```
 
 ### 3. Reflecting to Remote Repository

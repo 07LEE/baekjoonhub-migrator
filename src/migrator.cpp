@@ -56,6 +56,12 @@ std::string trim(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
+std::string rstrip_newline(const std::string& s) {
+    size_t end = s.find_last_not_of("\r\n");
+    return (end == std::string::npos) ? "" : s.substr(0, end + 1);
+}
+
+
 struct GitCmdResult {
     int exit_code;
     std::string stdout_str;
@@ -816,7 +822,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 if (sp1 != std::string::npos && sp2 != std::string::npos) {
                     std::string fmode = rest.substr(0, sp1);
                     std::string dataref = rest.substr(sp1 + 1, sp2 - (sp1 + 1));
-                    std::string raw_path = trim(rest.substr(sp2 + 1));
+                    std::string raw_path = rstrip_newline(rest.substr(sp2 + 1));
                     std::string orig_path = unescape_path(raw_path);
 
                     commit_file_lines.push_back({"M", fmode, dataref, orig_path, line_str});
@@ -824,10 +830,11 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     commit_file_lines.push_back({"RAW", "", "", "", line_str});
                 }
             } else if (line_str.rfind("D ", 0) == 0) {
-                std::string raw_path = trim(line_str.substr(2));
+                std::string raw_path = rstrip_newline(line_str.substr(2));
                 std::string orig_path = unescape_path(raw_path);
                 commit_file_lines.push_back({"D", "", "", orig_path, line_str});
-            } else if (line_str.rfind("blob\n", 0) == 0) {
+            }
+ else if (line_str.rfind("blob\n", 0) == 0) {
                 flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = BLOB_MARK;

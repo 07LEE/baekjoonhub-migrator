@@ -245,6 +245,28 @@ def escape_path(path_str: str) -> str:
     return escaped
 
 
+def read_exact(stream, size: int) -> bytes:
+    """Read exactly size bytes from a stream.
+
+    Args:
+        stream: Stream object.
+        size: Number of bytes to read.
+
+    Returns:
+        Exact bytes read.
+
+    Raises:
+        EOFError: If EOF is reached before size bytes are read.
+    """
+    buf = bytearray()
+    while len(buf) < size:
+        chunk = stream.read(size - len(buf))
+        if not chunk:
+            raise EOFError(f"Unexpected EOF while reading {size} bytes (read {len(buf)} bytes)")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
 class GitRewriter:
     """Rewrites Git history using plumbing commands to preserve commit metadata."""
 
@@ -442,8 +464,8 @@ class GitRewriter:
         export_cmd = ['git', '-C', self.repo_dir, 'fast-export', current_branch]
         import_cmd = ['git', '-C', self.repo_dir, 'fast-import', '--force', '--quiet']
 
-        proc_export = subprocess.Popen(export_cmd, stdout=subprocess.PIPE, bufsize=0)
-        proc_import = subprocess.Popen(import_cmd, stdin=subprocess.PIPE, bufsize=0)
+        proc_export = subprocess.Popen(export_cmd, stdout=subprocess.PIPE, bufsize=-1)
+        proc_import = subprocess.Popen(import_cmd, stdin=subprocess.PIPE, bufsize=-1)
 
         exp_stdout = proc_export.stdout
         imp_stdin = proc_import.stdin
@@ -452,13 +474,22 @@ class GitRewriter:
         path_dialect_cache: Dict[str, str] = {}
         state = 'FREE'
         blob_mark = ''
+        pending_bytes = b''
 
         def get_blob_content_from_cache(ref: str) -> str:
             return sql_blob_cache.get(ref, '')
 
+        def read_next_line() -> bytes:
+            nonlocal pending_bytes
+            if pending_bytes:
+                line = pending_bytes + exp_stdout.readline()
+                pending_bytes = b''
+                return line
+            return exp_stdout.readline()
+
         try:
             while True:
-                line_bytes = exp_stdout.readline()
+                line_bytes = read_next_line()
                 if not line_bytes:
                     break
                 line_str = line_bytes.decode('utf-8', errors='replace')
@@ -486,11 +517,14 @@ class GitRewriter:
                     imp_stdin.write(line_bytes)
                     if line_str.startswith('data '):
                         size = int(line_str[5:].strip())
-                        content_bytes = exp_stdout.read(size)
+                        content_bytes = read_exact(exp_stdout, size)
                         imp_stdin.write(content_bytes)
                         nl = exp_stdout.read(1)
                         if nl:
-                            imp_stdin.write(nl)
+                            if nl == b'\n':
+                                imp_stdin.write(nl)
+                            else:
+                                pending_bytes = nl
                         if blob_mark and size < 1024 * 1024:
                             sql_blob_cache[blob_mark] = content_bytes.decode('utf-8', errors='replace')
                         blob_mark = ''
@@ -502,11 +536,14 @@ class GitRewriter:
                     if line_str.startswith('data '):
                         imp_stdin.write(line_bytes)
                         size = int(line_str[5:].strip())
-                        msg_bytes = exp_stdout.read(size)
+                        msg_bytes = read_exact(exp_stdout, size)
                         imp_stdin.write(msg_bytes)
                         nl = exp_stdout.read(1)
                         if nl:
-                            imp_stdin.write(nl)
+                            if nl == b'\n':
+                                imp_stdin.write(nl)
+                            else:
+                                pending_bytes = nl
                     elif line_str.startswith('M '):
                         rest = line_str[2:]
                         sp1 = rest.find(' ')
@@ -560,8 +597,12 @@ class GitRewriter:
         finally:
             exp_stdout.close()
             imp_stdin.close()
-            proc_export.wait()
-            proc_import.wait()
+            ret_exp = proc_export.wait()
+            ret_imp = proc_import.wait()
+            if ret_exp != 0 or ret_imp != 0:
+                raise RuntimeError(
+                    f"Git fast-export/import failed (export exit code: {ret_exp}, import exit code: {ret_imp})"
+                )
 
         self._run_git(['checkout', '-f', current_branch])
         print(f"\n[+] Migration successfully finished! Branch '{current_branch}' now points to rewritten history.")

@@ -553,11 +553,22 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             if (line_str.rfind("data ", 0) == 0) {
                 size_t size = std::stoull(line_str.substr(5));
                 std::string content(size, '\0');
-                size_t bytes_read = fread(&content[0], 1, size, exp_pipe);
+                size_t bytes_read = 0;
+                while (bytes_read < size) {
+                    size_t r = fread(&content[bytes_read], 1, size - bytes_read, exp_pipe);
+                    if (r == 0) break;
+                    bytes_read += r;
+                }
                 fwrite(content.c_str(), 1, bytes_read, imp_pipe);
 
                 int nl = fgetc(exp_pipe);
-                if (nl != EOF) fputc(nl, imp_pipe);
+                if (nl != EOF) {
+                    if (nl == '\n') {
+                        fputc(nl, imp_pipe);
+                    } else {
+                        ungetc(nl, exp_pipe);
+                    }
+                }
 
                 if (!blob_mark.empty() && size < 1024 * 1024) {
                     sql_blob_cache[blob_mark] = content;
@@ -572,11 +583,22 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 fputs(line_buf, imp_pipe);
                 size_t size = std::stoull(line_str.substr(5));
                 std::string content(size, '\0');
-                size_t bytes_read = fread(&content[0], 1, size, exp_pipe);
+                size_t bytes_read = 0;
+                while (bytes_read < size) {
+                    size_t r = fread(&content[bytes_read], 1, size - bytes_read, exp_pipe);
+                    if (r == 0) break;
+                    bytes_read += r;
+                }
                 fwrite(content.c_str(), 1, bytes_read, imp_pipe);
 
                 int nl = fgetc(exp_pipe);
-                if (nl != EOF) fputc(nl, imp_pipe);
+                if (nl != EOF) {
+                    if (nl == '\n') {
+                        fputc(nl, imp_pipe);
+                    } else {
+                        ungetc(nl, exp_pipe);
+                    }
+                }
             } else if (line_str.rfind("M ", 0) == 0) {
                 std::string rest = line_str.substr(2);
                 size_t sp1 = rest.find(' ');
@@ -631,14 +653,20 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     }
 
 #if IS_WINDOWS
-    _pclose(exp_pipe);
-    _pclose(imp_pipe);
+    int status_exp = _pclose(exp_pipe);
+    int status_imp = _pclose(imp_pipe);
 #else
     fclose(exp_pipe);
     fclose(imp_pipe);
-    waitpid(pid_exp, nullptr, 0);
-    waitpid(pid_imp, nullptr, 0);
+    int status_exp = 0, status_imp = 0;
+    waitpid(pid_exp, &status_exp, 0);
+    waitpid(pid_imp, &status_imp, 0);
 #endif
+
+    if (status_exp != 0 || status_imp != 0) {
+        std::cerr << "[-] Error: Git fast-export or fast-import process failed.\n";
+        return;
+    }
 
     run_git_command(repo_dir, {"checkout", "-f", current_branch});
     std::cout << "\n[+] Migration successfully finished! Branch '" << current_branch << "' now points to rewritten history.\n";

@@ -80,6 +80,16 @@ class TestPathMapper(unittest.TestCase):
         transformed = PathMapper.transform_path(path, "flat")
         self.assertEqual(transformed, "백준/Bronze/1000.py")
 
+    def test_read_exact(self):
+        import io
+        from migrator import read_exact
+        stream = io.BytesIO(b"hello world")
+        data = read_exact(stream, 5)
+        self.assertEqual(data, b"hello")
+        with self.assertRaises(EOFError):
+            read_exact(stream, 10)
+
 
 if __name__ == '__main__':
     unittest.main()
+

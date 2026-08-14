@@ -233,25 +233,30 @@ def unescape_path(path_str: str) -> str:
 
 
 def escape_path(path_str: str) -> str:
-    """Escape path string for git fast-import format if it contains spaces or quotes."""
-    needs_quoting = any(c in path_str for c in ' \t\n"\\')
+    """Escape path for Git fast-import stream format following C-style escaping rules."""
+    path_bytes = path_str.encode('utf-8')
+    needs_quoting = any(b <= 32 or b >= 127 or b in (34, 92) for b in path_bytes)
     if not needs_quoting:
         return path_str
 
     escaped = '"'
-    for c in path_str:
-        if c == '"':
+    for b in path_bytes:
+        if b == 34:  # quote "
             escaped += '\\"'
-        elif c == '\\':
+        elif b == 92:  # backslash \
             escaped += '\\\\'
-        elif c == '\n':
+        elif b == 10:  # newline \n
             escaped += '\\n'
-        elif c == '\t':
+        elif b == 9:  # tab \t
             escaped += '\\t'
+        elif b <= 32 or b >= 127:
+            escaped += f'\\{b:03o}'
         else:
-            escaped += c
+            escaped += chr(b)
     escaped += '"'
     return escaped
+
+
 
 
 def read_exact(stream, size: int) -> bytes:
@@ -538,12 +543,78 @@ class GitRewriter:
         sql_blob_cache: Dict[str, str] = {}
         path_dialect_cache: Dict[str, str] = {}
         folder_lang_map: Dict[str, str] = {}
+        commit_file_lines: List[Tuple[str, str, str, str, bytes]] = []
         state = 'FREE'
         blob_mark = ''
         pending_bytes = b''
 
         def get_blob_content_from_cache(ref: str) -> str:
             return sql_blob_cache.get(ref, '')
+
+        def flush_commit_file_lines() -> None:
+            nonlocal commit_file_lines
+            if not commit_file_lines:
+                return
+
+            # Pass 1: Scan all code files in this commit to update folder_lang_map
+            for action_type, fmode, dataref, orig_path, line_bytes in commit_file_lines:
+                if action_type == 'M' and orig_path:
+                    parts = [p for p in orig_path.replace('\\', '/').split('/') if p]
+                    if len(parts) > 1 and parts[-1].lower() != 'readme.md':
+                        filename = parts[-1]
+                        _, ext = os.path.splitext(filename.lower())
+                        if ext:
+                            top_dir = parts[0]
+                            sub_parts = parts[1:]
+                            if top_dir not in PathMapper.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in PathMapper.PLATFORMS:
+                                problem_key = '/'.join(sub_parts[:-1])
+                            else:
+                                problem_key = '/'.join(parts[:-1])
+
+                            if ext == '.sql':
+                                c_text = get_blob_content_from_cache(dataref)
+                                l_found = PathMapper.detect_sql_dialect(c_text) if c_text else 'MySQL'
+                            else:
+                                l_found = PathMapper.LANGUAGE_EXTENSIONS.get(ext)
+                            if l_found:
+                                folder_lang_map[problem_key] = l_found
+
+            # Pass 2: Transform and write buffered lines using updated folder_lang_map
+            for action_type, fmode, dataref, orig_path, line_bytes in commit_file_lines:
+                if action_type == 'M':
+                    new_path = PathMapper.transform_path(
+                        orig_path, mode,
+                        content_getter=get_blob_content_from_cache,
+                        blob_sha=dataref,
+                        folder_lang_map=folder_lang_map
+                    )
+                    if orig_path.lower().endswith('.sql') and dataref in PathMapper.SQL_CACHE:
+                        path_dialect_cache[orig_path] = PathMapper.SQL_CACHE[dataref]
+
+                    escaped_new = escape_path(new_path)
+                    new_line = f"M {fmode} {dataref} {escaped_new}\n"
+                    imp_stdin.write(new_line.encode('utf-8'))
+                elif action_type == 'D':
+                    cached_dialect = path_dialect_cache.get(orig_path)
+                    if cached_dialect:
+                        PathMapper.SQL_CACHE['__path__' + orig_path] = cached_dialect
+                        new_path = PathMapper.transform_path(
+                            orig_path, mode,
+                            blob_sha='__path__' + orig_path,
+                            folder_lang_map=folder_lang_map
+                        )
+                    else:
+                        new_path = PathMapper.transform_path(
+                            orig_path, mode,
+                            folder_lang_map=folder_lang_map
+                        )
+                    escaped_new = escape_path(new_path)
+                    new_line = f"D {escaped_new}\n"
+                    imp_stdin.write(new_line.encode('utf-8'))
+                else:
+                    imp_stdin.write(line_bytes)
+
+            commit_file_lines.clear()
 
         def read_next_line() -> bytes:
             nonlocal pending_bytes
@@ -552,6 +623,7 @@ class GitRewriter:
                 pending_bytes = b''
                 return line
             return exp_stdout.readline()
+
 
         try:
             while True:
@@ -619,76 +691,35 @@ class GitRewriter:
                             dataref = rest[sp1 + 1:sp2]
                             raw_path = rest[sp2 + 1:].strip()
                             orig_path = unescape_path(raw_path)
-
-                            # Populate folder_lang_map from non-README code files
-                            parts = [p for p in orig_path.replace('\\', '/').split('/') if p]
-                            if len(parts) > 1 and parts[-1].lower() != 'readme.md':
-                                filename = parts[-1]
-                                _, ext = os.path.splitext(filename.lower())
-                                if ext:
-                                    top_dir = parts[0]
-                                    sub_parts = parts[1:]
-                                    if top_dir not in PathMapper.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in PathMapper.PLATFORMS:
-                                        problem_key = '/'.join(sub_parts[:-1])
-                                    else:
-                                        problem_key = '/'.join(parts[:-1])
-
-                                    if ext == '.sql':
-                                        c_text = get_blob_content_from_cache(dataref)
-                                        l_found = PathMapper.detect_sql_dialect(c_text) if c_text else 'MySQL'
-                                    else:
-                                        l_found = PathMapper.LANGUAGE_EXTENSIONS.get(ext)
-                                    if l_found:
-                                        folder_lang_map[problem_key] = l_found
-
-
-                            new_path = PathMapper.transform_path(
-                                orig_path, mode,
-                                content_getter=get_blob_content_from_cache,
-                                blob_sha=dataref,
-                                folder_lang_map=folder_lang_map
-                            )
-                            if orig_path.lower().endswith('.sql') and dataref in PathMapper.SQL_CACHE:
-                                path_dialect_cache[orig_path] = PathMapper.SQL_CACHE[dataref]
-
-                            escaped_new = escape_path(new_path)
-                            new_line = f"M {fmode} {dataref} {escaped_new}\n"
-                            imp_stdin.write(new_line.encode('utf-8'))
+                            commit_file_lines.append(('M', fmode, dataref, orig_path, line_bytes))
                         else:
-                            imp_stdin.write(line_bytes)
+                            commit_file_lines.append(('RAW', '', '', '', line_bytes))
                     elif line_str.startswith('D '):
                         raw_path = line_str[2:].strip()
                         orig_path = unescape_path(raw_path)
-                        cached_dialect = path_dialect_cache.get(orig_path)
-                        if cached_dialect:
-                            PathMapper.SQL_CACHE['__path__' + orig_path] = cached_dialect
-                            new_path = PathMapper.transform_path(
-                                orig_path, mode,
-                                blob_sha='__path__' + orig_path,
-                                folder_lang_map=folder_lang_map
-                            )
-                        else:
-                            new_path = PathMapper.transform_path(
-                                orig_path, mode,
-                                folder_lang_map=folder_lang_map
-                            )
-                        escaped_new = escape_path(new_path)
-                        new_line = f"D {escaped_new}\n"
-                        imp_stdin.write(new_line.encode('utf-8'))
+                        commit_file_lines.append(('D', '', '', orig_path, line_bytes))
                     elif line_str.startswith('blob\n'):
+                        flush_commit_file_lines()
                         imp_stdin.write(line_bytes)
                         state = 'BLOB_MARK'
                     elif line_str.startswith('commit '):
+                        flush_commit_file_lines()
                         imp_stdin.write(line_bytes)
                         state = 'COMMIT'
                     elif line_str.startswith(('reset ', 'tag ', 'checkpoint\n')):
+                        flush_commit_file_lines()
                         imp_stdin.write(line_bytes)
                         state = 'FREE'
+                    elif line_str == '\n':
+                        # Ignore trailing blank lines inside commit block until commit is flushed
+                        pass
                     else:
                         imp_stdin.write(line_bytes)
 
+            flush_commit_file_lines()
         finally:
             exp_stdout.close()
+
             imp_stdin.close()
             ret_exp = proc_export.wait()
             ret_imp = proc_import.wait()

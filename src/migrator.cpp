@@ -385,8 +385,8 @@ std::string unescape_path(const std::string& path_str) {
 
 std::string escape_path(const std::string& path_str) {
     bool needs_quoting = false;
-    for (char c : path_str) {
-        if (c == ' ' || c == '\t' || c == '\n' || c == '"' || c == '\\') {
+    for (unsigned char c : path_str) {
+        if (c <= 32 || c >= 127 || c == '"' || c == '\\') {
             needs_quoting = true;
             break;
         }
@@ -394,16 +394,23 @@ std::string escape_path(const std::string& path_str) {
     if (!needs_quoting) return path_str;
 
     std::string escaped = "\"";
-    for (char c : path_str) {
+    for (unsigned char c : path_str) {
         if (c == '"') escaped += "\\\"";
         else if (c == '\\') escaped += "\\\\";
         else if (c == '\n') escaped += "\\n";
         else if (c == '\t') escaped += "\\t";
-        else escaped.push_back(c);
+        else if (c <= 32 || c >= 127) {
+            char oct_buf[8];
+            snprintf(oct_buf, sizeof(oct_buf), "\\%03o", c);
+            escaped += oct_buf;
+        } else {
+            escaped.push_back(c);
+        }
     }
     escaped += "\"";
     return escaped;
 }
+
 
 std::string create_backup_branch(const std::string& repo_dir, const std::string& base_name = "backup-before-migration") {
     std::string existing = trim(run_git_command(repo_dir, {"branch", "--list", base_name}));
@@ -630,15 +637,111 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     State state = FREE;
     std::string blob_mark = "";
 
+    struct CommitFileLine {
+        std::string action;
+        std::string fmode;
+        std::string dataref;
+        std::string orig_path;
+        std::string raw_line;
+    };
+    std::vector<CommitFileLine> commit_file_lines;
+
+    auto content_getter = [&](const std::string& sha) -> std::string {
+        auto it = sql_blob_cache.find(sha);
+        return (it != sql_blob_cache.end()) ? it->second : "";
+    };
+
+
+
+    auto flush_commit_file_lines = [&]() {
+        if (commit_file_lines.empty()) return;
+
+        // Pass 1: Scan code files to update folder_lang_map
+        for (const auto& line_item : commit_file_lines) {
+            if (line_item.action == "M" && !line_item.orig_path.empty()) {
+                std::string norm_p = line_item.orig_path;
+                std::replace(norm_p.begin(), norm_p.end(), '\\', '/');
+                std::vector<std::string> parts;
+                std::stringstream ss(norm_p);
+                std::string part;
+                while (std::getline(ss, part, '/')) {
+                    if (!part.empty()) parts.push_back(part);
+                }
+
+                if (parts.size() > 1 && to_lower(parts.back()) != "readme.md") {
+                    fs::path fp(parts.back());
+                    if (fp.has_extension()) {
+                        std::string top_dir = parts[0];
+                        std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
+                        std::string problem_key = "";
+                        if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
+                            for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
+                                if (i > 0) problem_key += "/";
+                                problem_key += sub_parts[i];
+                            }
+                        } else {
+                            for (size_t i = 0; i < parts.size() - 1; ++i) {
+                                if (i > 0) problem_key += "/";
+                                problem_key += parts[i];
+                            }
+                        }
+
+                        std::string ext = to_lower(fp.extension().string());
+                        std::string l_found = "";
+                        if (ext == ".sql") {
+                            std::string c_text = content_getter(line_item.dataref);
+                            l_found = !c_text.empty() ? PathMapper::detect_sql_dialect(c_text) : "MySQL";
+                        } else {
+                            auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
+                            if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {
+                                l_found = it->second;
+                            }
+                        }
+                        if (!l_found.empty()) {
+                            folder_lang_map[problem_key] = l_found;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Transform paths and write to imp_pipe
+        for (const auto& line_item : commit_file_lines) {
+            if (line_item.action == "M") {
+                std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map);
+                if (PathMapper::SQL_CACHE.count(line_item.dataref)) {
+                    path_dialect_cache[line_item.orig_path] = PathMapper::SQL_CACHE[line_item.dataref];
+                }
+                std::string escaped_new = escape_path(new_path);
+                std::string new_line = "M " + line_item.fmode + " " + line_item.dataref + " " + escaped_new + "\n";
+                fputs(new_line.c_str(), imp_pipe);
+            } else if (line_item.action == "D") {
+                auto it = path_dialect_cache.find(line_item.orig_path);
+                if (it != path_dialect_cache.end()) {
+                    PathMapper::SQL_CACHE["__path__" + line_item.orig_path] = it->second;
+                }
+                std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, nullptr, "__path__" + line_item.orig_path, folder_lang_map);
+                std::string escaped_new = escape_path(new_path);
+                std::string new_line = "D " + escaped_new + "\n";
+                fputs(new_line.c_str(), imp_pipe);
+            } else {
+                fputs(line_item.raw_line.c_str(), imp_pipe);
+            }
+        }
+        commit_file_lines.clear();
+    };
+
     char line_buf[8192];
     while (fgets(line_buf, sizeof(line_buf), exp_pipe) != nullptr) {
         std::string line_str(line_buf);
 
         if (state == FREE) {
             if (line_str.rfind("blob\n", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = BLOB_MARK;
             } else if (line_str.rfind("commit ", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = COMMIT;
             } else {
@@ -685,6 +788,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             }
         } else if (state == COMMIT) {
             if (line_str.rfind("data ", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 size_t size = std::stoull(line_str.substr(5));
                 std::string content(size, '\0');
@@ -713,94 +817,40 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     std::string fmode = rest.substr(0, sp1);
                     std::string dataref = rest.substr(sp1 + 1, sp2 - (sp1 + 1));
                     std::string raw_path = trim(rest.substr(sp2 + 1));
-
                     std::string orig_path = unescape_path(raw_path);
-                    auto content_getter = [&](const std::string& sha) -> std::string {
-                        auto it = sql_blob_cache.find(sha);
-                        return (it != sql_blob_cache.end()) ? it->second : "";
-                    };
 
-                    // Populate folder_lang_map from non-README code files
-                    std::string norm_p = orig_path;
-                    std::replace(norm_p.begin(), norm_p.end(), '\\', '/');
-                    std::vector<std::string> parts;
-                    std::stringstream ss(norm_p);
-                    std::string part;
-                    while (std::getline(ss, part, '/')) {
-                        if (!part.empty()) parts.push_back(part);
-                    }
-                    if (parts.size() > 1 && to_lower(parts.back()) != "readme.md") {
-                        fs::path fp(parts.back());
-                        if (fp.has_extension()) {
-                            std::string top_dir = parts[0];
-                            std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
-                            std::string problem_key = "";
-                            if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
-                                for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
-                                    if (i > 0) problem_key += "/";
-                                    problem_key += sub_parts[i];
-                                }
-                            } else {
-                                for (size_t i = 0; i < parts.size() - 1; ++i) {
-                                    if (i > 0) problem_key += "/";
-                                    problem_key += parts[i];
-                                }
-                            }
-
-                            std::string ext = to_lower(fp.extension().string());
-                            std::string l_found = "";
-                            if (ext == ".sql") {
-                                std::string c_text = content_getter(dataref);
-                                l_found = !c_text.empty() ? PathMapper::detect_sql_dialect(c_text) : "MySQL";
-                            } else {
-                                auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
-                                if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {
-                                    l_found = it->second;
-                                }
-                            }
-                            if (!l_found.empty()) {
-                                folder_lang_map[problem_key] = l_found;
-                            }
-                        }
-                    }
-
-
-                    std::string new_path = PathMapper::transform_path(orig_path, mode, content_getter, dataref, folder_lang_map);
-                    if (PathMapper::SQL_CACHE.count(dataref)) {
-                        path_dialect_cache[orig_path] = PathMapper::SQL_CACHE[dataref];
-                    }
-
-                    std::string escaped_new = escape_path(new_path);
-                    std::string new_line = "M " + fmode + " " + dataref + " " + escaped_new + "\n";
-                    fputs(new_line.c_str(), imp_pipe);
+                    commit_file_lines.push_back({"M", fmode, dataref, orig_path, line_str});
                 } else {
-                    fputs(line_buf, imp_pipe);
+                    commit_file_lines.push_back({"RAW", "", "", "", line_str});
                 }
             } else if (line_str.rfind("D ", 0) == 0) {
                 std::string raw_path = trim(line_str.substr(2));
                 std::string orig_path = unescape_path(raw_path);
-                auto it = path_dialect_cache.find(orig_path);
-                if (it != path_dialect_cache.end()) {
-                    PathMapper::SQL_CACHE["__path__" + orig_path] = it->second;
-                }
-                std::string new_path = PathMapper::transform_path(orig_path, mode, nullptr, "__path__" + orig_path, folder_lang_map);
-                std::string escaped_new = escape_path(new_path);
-                std::string new_line = "D " + escaped_new + "\n";
-                fputs(new_line.c_str(), imp_pipe);
+                commit_file_lines.push_back({"D", "", "", orig_path, line_str});
             } else if (line_str.rfind("blob\n", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = BLOB_MARK;
             } else if (line_str.rfind("commit ", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = COMMIT;
             } else if (line_str.rfind("reset ", 0) == 0 || line_str.rfind("tag ", 0) == 0 || line_str.rfind("checkpoint\n", 0) == 0) {
+                flush_commit_file_lines();
                 fputs(line_buf, imp_pipe);
                 state = FREE;
+            } else if (line_str == "\n") {
+                // Ignore blank lines inside commit block until commit is flushed
             } else {
                 fputs(line_buf, imp_pipe);
             }
+
+
         }
     }
+    flush_commit_file_lines();
+
+
 
 #if IS_WINDOWS
     int status_exp = _pclose(exp_pipe);

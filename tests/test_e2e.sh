@@ -72,16 +72,17 @@ git -C "${FIXTURE_REPO}" checkout -q main
 GIT_COMMITTER_DATE="1666202200 +0900" GIT_AUTHOR_DATE="1666202200 +0900" \
 git -C "${FIXTURE_REPO}" merge -q --no-ff feature-branch -m "Merge branch 'feature-branch'"
 
-# Record pre-migration log & commit count
+# Record pre-migration log, commit count, and blob SHA set
 PRE_COMMIT_COUNT=$(git -C "${FIXTURE_REPO}" rev-list --count HEAD)
 PRE_LOG_RAW=$(git -C "${FIXTURE_REPO}" log --date=raw --pretty=format:"%an <%ae> %ad | %cn <%ce> %cd | %s")
+PRE_BLOBS=$(git -C "${FIXTURE_REPO}" ls-tree -r HEAD | awk '{print $3}' | sort -u)
 
 echo "[+] Running C++ migration engine in language_first mode with 120s timeout..."
 timeout 120 "${MIGRATOR_BIN}" --repo "${FIXTURE_REPO}" --mode language_first -y
 
 echo "[+] Verifying migration output integrity..."
 
-# 1. Verify Commit Count & Metadata Raw Timestamps
+# 1. Verify Commit Count, Metadata Raw Timestamps, and Unique Blob SHA Set
 POST_COMMIT_COUNT=$(git -C "${FIXTURE_REPO}" rev-list --count HEAD)
 if [ "${PRE_COMMIT_COUNT}" -ne "${POST_COMMIT_COUNT}" ]; then
     echo "[-] FAIL: Commit count mismatch (pre: ${PRE_COMMIT_COUNT}, post: ${POST_COMMIT_COUNT})"
@@ -97,6 +98,18 @@ if [ "${PRE_LOG_RAW}" != "${POST_LOG_RAW}" ]; then
     echo "${POST_LOG_RAW}"
     exit 1
 fi
+
+POST_BLOBS=$(git -C "${FIXTURE_REPO}" ls-tree -r HEAD | awk '{print $3}' | sort -u)
+if [ "${PRE_BLOBS}" != "${POST_BLOBS}" ]; then
+    echo "[-] FAIL: Blob SHA contents mismatch after migration!"
+    echo "Expected:"
+    echo "${PRE_BLOBS}"
+    echo "Got:"
+    echo "${POST_BLOBS}"
+    exit 1
+fi
+
+
 
 # 2. Verify Exact Expected Directory Tree 1-to-1
 ACTUAL_TREE=$(git -C "${FIXTURE_REPO}" ls-tree -r -z --name-only HEAD | tr '\0' '\n' | sort)

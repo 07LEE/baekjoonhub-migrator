@@ -89,7 +89,21 @@ class TestPathMapper(unittest.TestCase):
         with self.assertRaises(EOFError):
             read_exact(stream, 10)
 
+    def test_folder_name_with_dot_not_misidentified(self):
+        path = "프로그래머스/1/12345. 신고 결과 받기/solution.cpp"
+        transformed = PathMapper.transform_path(path, "language_first")
+        self.assertEqual(transformed, "C++/프로그래머스/1/12345. 신고 결과 받기/solution.cpp")
+
+    def test_readme_inherits_folder_language(self):
+        path_readme = "프로그래머스/1/12345. 신고 결과 받기/README.md"
+        folder_map = {"프로그래머스/1/12345. 신고 결과 받기": "C++"}
+        transformed = PathMapper.transform_path(path_readme, "language_first", folder_lang_map=folder_map)
+        self.assertEqual(transformed, "C++/프로그래머스/1/12345. 신고 결과 받기/README.md")
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
 

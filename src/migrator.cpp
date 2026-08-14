@@ -73,8 +73,9 @@ GitCmdResult run_git_exec(const std::string& repo_dir, const std::vector<std::st
     FILE* pipe = _popen(cmd.c_str(), "r");
     if (!pipe) return res;
     char buffer[4096];
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        res.stdout_str += buffer;
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
+        res.stdout_str.append(buffer, n);
     }
     res.exit_code = _pclose(pipe);
     return res;
@@ -118,7 +119,7 @@ GitCmdResult run_git_exec(const std::string& repo_dir, const std::vector<std::st
         argv_ptrs.push_back(nullptr);
 
         execvp("git", argv_ptrs.data());
-        exit(127);
+        _exit(127);
     }
 
     close(pipe_out[1]);
@@ -137,7 +138,7 @@ GitCmdResult run_git_exec(const std::string& repo_dir, const std::vector<std::st
     char buffer[4096];
     ssize_t n;
     while ((n = read(pipe_out[0], buffer, sizeof(buffer))) > 0) {
-        res.stdout_str.append(buffer, n);
+        res.stdout_str.append(buffer, static_cast<size_t>(n));
     }
     close(pipe_out[0]);
 
@@ -215,7 +216,8 @@ public:
         const std::string& path,
         const std::string& mode,
         const std::function<std::string(const std::string&)>& content_getter = nullptr,
-        const std::string& blob_sha = ""
+        const std::string& blob_sha = "",
+        const std::unordered_map<std::string, std::string>& folder_lang_map = {}
     ) {
         std::string norm_path = path;
         std::replace(norm_path.begin(), norm_path.end(), '\\', '/');
@@ -234,14 +236,12 @@ public:
 
         std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
 
-        // Find code file
+        // Find code file (inspect ONLY the filename, not parent directory names)
+        std::string filename = parts.back();
+        std::string lower_filename = to_lower(filename);
         std::string code_file = "";
-        for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-            std::string lower_p = to_lower(*it);
-            if (lower_p != "readme.md" && fs::path(*it).has_extension()) {
-                code_file = *it;
-                break;
-            }
+        if (lower_filename != "readme.md" && fs::path(filename).has_extension()) {
+            code_file = filename;
         }
 
         std::string detected_lang = "";
@@ -269,6 +269,27 @@ public:
             }
         }
 
+        // Fallback to folder_lang_map if language isn't directly detected from this file
+        if (detected_lang.empty() && !folder_lang_map.empty() && parts.size() > 1) {
+            std::string problem_key = "";
+            if (PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() && PLATFORMS.find(sub_parts[0]) != PLATFORMS.end()) {
+                for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
+                    if (i > 0) problem_key += "/";
+                    problem_key += sub_parts[i];
+                }
+            } else {
+                for (size_t i = 0; i < parts.size() - 1; ++i) {
+                    if (i > 0) problem_key += "/";
+                    problem_key += parts[i];
+                }
+            }
+            auto it = folder_lang_map.find(problem_key);
+            if (it != folder_lang_map.end()) {
+                detected_lang = it->second;
+            }
+        }
+
+
         std::string lang = "";
         std::string platform = "";
         std::vector<std::string> rel_path_parts;
@@ -282,7 +303,7 @@ public:
         // Case B: Top directory is platform
         else if (PLATFORMS.find(top_dir) != PLATFORMS.end()) {
             platform = top_dir;
-            lang = !detected_lang.empty() ? detected_lang : "Python";
+            lang = !detected_lang.empty() ? detected_lang : "Misc";
             rel_path_parts = sub_parts;
         } else {
             return path;
@@ -400,6 +421,79 @@ std::string create_backup_branch(const std::string& repo_dir, const std::string&
     return branch_name;
 }
 
+std::unordered_map<std::string, std::string> build_folder_lang_map(
+    const std::vector<std::tuple<std::string, std::string, std::string, std::string>>& entries,
+    const std::function<std::string(const std::string&)>& content_getter = nullptr
+) {
+    std::unordered_map<std::string, std::string> folder_map;
+    for (const auto& entry : entries) {
+        std::string item_type = std::get<1>(entry);
+        std::string blob_sha = std::get<2>(entry);
+        std::string old_path = std::get<3>(entry);
+        if (item_type != "blob") continue;
+
+        std::string norm_path = old_path;
+        std::replace(norm_path.begin(), norm_path.end(), '\\', '/');
+        std::vector<std::string> parts;
+        std::stringstream ss(norm_path);
+        std::string part;
+        while (std::getline(ss, part, '/')) {
+            if (!part.empty()) parts.push_back(part);
+        }
+        if (parts.size() <= 1) continue;
+
+        std::string filename = parts.back();
+        if (to_lower(filename) == "readme.md") continue;
+
+        fs::path p(filename);
+        if (!p.has_extension()) continue;
+
+        std::string top_dir = parts[0];
+        std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
+        std::string problem_key = "";
+        if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
+            for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
+                if (i > 0) problem_key += "/";
+                problem_key += sub_parts[i];
+            }
+        } else {
+            for (size_t i = 0; i < parts.size() - 1; ++i) {
+                if (i > 0) problem_key += "/";
+                problem_key += parts[i];
+            }
+        }
+
+        std::string ext = to_lower(p.extension().string());
+        std::string lang = "";
+        if (ext == ".sql") {
+            if (!blob_sha.empty() && PathMapper::SQL_CACHE.count(blob_sha)) {
+                lang = PathMapper::SQL_CACHE[blob_sha];
+            } else if (content_getter && !blob_sha.empty()) {
+                try {
+                    std::string content = content_getter(blob_sha);
+                    lang = PathMapper::detect_sql_dialect(content);
+                    PathMapper::SQL_CACHE[blob_sha] = lang;
+                } catch (...) {
+                    lang = "MySQL";
+                }
+            } else {
+                lang = "MySQL";
+            }
+        } else {
+            auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
+            if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {
+                lang = it->second;
+            }
+        }
+
+        if (!lang.empty() && folder_map.find(problem_key) == folder_map.end()) {
+            folder_map[problem_key] = lang;
+        }
+
+    }
+    return folder_map;
+}
+
 void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::string commits_out = run_git_command(repo_dir, {"log", "--reverse", "--format=%H"});
     std::stringstream ss(commits_out);
@@ -430,6 +524,7 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         return run_git_command(repo_dir, {"cat-file", "-p", sha});
     };
 
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries_list;
     size_t pos = 0;
     while (pos < tree_out.length()) {
         size_t null_pos = tree_out.find('\0', pos);
@@ -438,7 +533,6 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         pos = null_pos + 1;
 
         if (entry_str.empty()) continue;
-        total_files++;
         size_t tab_pos = entry_str.find('\t');
         if (tab_pos == std::string::npos) continue;
 
@@ -448,8 +542,17 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         std::stringstream mss(meta);
         std::string mode_str, item_type, sha;
         mss >> mode_str >> item_type >> sha;
+        entries_list.emplace_back(mode_str, item_type, sha, path);
+    }
 
-        std::string new_path = PathMapper::transform_path(path, mode, content_getter, sha);
+    auto folder_lang_map = build_folder_lang_map(entries_list, content_getter);
+
+    for (const auto& entry : entries_list) {
+        total_files++;
+        std::string path = std::get<3>(entry);
+        std::string sha = std::get<2>(entry);
+
+        std::string new_path = PathMapper::transform_path(path, mode, content_getter, sha, folder_lang_map);
         if (count < 20) {
             if (new_path != path) {
                 std::cout << " [MOVE] " << path << "\n     -> " << new_path << "\n";
@@ -474,13 +577,11 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     std::cout << "[+] Starting Git history rewrite for branch '" << current_branch << "'...\n";
     std::string backup_branch = create_backup_branch(repo_dir);
 
+#if IS_WINDOWS
     std::string export_cmd = "git -C \"" + repo_dir + "\" fast-export \"" + current_branch + "\"";
     std::string import_cmd = "git -C \"" + repo_dir + "\" fast-import --force --quiet";
-
-#if IS_WINDOWS
     FILE* exp_pipe = _popen(export_cmd.c_str(), "rb");
     FILE* imp_pipe = _popen(import_cmd.c_str(), "wb");
-
     if (!exp_pipe || !imp_pipe) {
         std::cerr << "[-] Error creating process pipe for fast-export/import.\n";
         return;
@@ -488,7 +589,6 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 #else
     int pipe_exp[2];
     int pipe_imp[2];
-
     if (pipe(pipe_exp) < 0 || pipe(pipe_imp) < 0) {
         std::cerr << "[-] Error creating POSIX pipes.\n";
         return;
@@ -499,8 +599,10 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         close(pipe_exp[0]);
         dup2(pipe_exp[1], STDOUT_FILENO);
         close(pipe_exp[1]);
+        close(pipe_imp[0]);
+        close(pipe_imp[1]);
         execlp("git", "git", "-C", repo_dir.c_str(), "fast-export", current_branch.c_str(), nullptr);
-        exit(1);
+        _exit(1);
     }
 
     pid_t pid_imp = fork();
@@ -508,8 +610,10 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         close(pipe_imp[1]);
         dup2(pipe_imp[0], STDIN_FILENO);
         close(pipe_imp[0]);
+        close(pipe_exp[0]);
+        close(pipe_exp[1]);
         execlp("git", "git", "-C", repo_dir.c_str(), "fast-import", "--force", "--quiet", nullptr);
-        exit(1);
+        _exit(1);
     }
 
     close(pipe_exp[1]);
@@ -521,6 +625,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     std::unordered_map<std::string, std::string> sql_blob_cache;
     std::unordered_map<std::string, std::string> path_dialect_cache;
+    std::unordered_map<std::string, std::string> folder_lang_map;
     enum State { FREE, BLOB_MARK, BLOB_DATA_HEADER, COMMIT };
     State state = FREE;
     std::string blob_mark = "";
@@ -615,7 +720,52 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                         return (it != sql_blob_cache.end()) ? it->second : "";
                     };
 
-                    std::string new_path = PathMapper::transform_path(orig_path, mode, content_getter, dataref);
+                    // Populate folder_lang_map from non-README code files
+                    std::string norm_p = orig_path;
+                    std::replace(norm_p.begin(), norm_p.end(), '\\', '/');
+                    std::vector<std::string> parts;
+                    std::stringstream ss(norm_p);
+                    std::string part;
+                    while (std::getline(ss, part, '/')) {
+                        if (!part.empty()) parts.push_back(part);
+                    }
+                    if (parts.size() > 1 && to_lower(parts.back()) != "readme.md") {
+                        fs::path fp(parts.back());
+                        if (fp.has_extension()) {
+                            std::string top_dir = parts[0];
+                            std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
+                            std::string problem_key = "";
+                            if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
+                                for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
+                                    if (i > 0) problem_key += "/";
+                                    problem_key += sub_parts[i];
+                                }
+                            } else {
+                                for (size_t i = 0; i < parts.size() - 1; ++i) {
+                                    if (i > 0) problem_key += "/";
+                                    problem_key += parts[i];
+                                }
+                            }
+
+                            std::string ext = to_lower(fp.extension().string());
+                            std::string l_found = "";
+                            if (ext == ".sql") {
+                                std::string c_text = content_getter(dataref);
+                                l_found = !c_text.empty() ? PathMapper::detect_sql_dialect(c_text) : "MySQL";
+                            } else {
+                                auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
+                                if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {
+                                    l_found = it->second;
+                                }
+                            }
+                            if (!l_found.empty()) {
+                                folder_lang_map[problem_key] = l_found;
+                            }
+                        }
+                    }
+
+
+                    std::string new_path = PathMapper::transform_path(orig_path, mode, content_getter, dataref, folder_lang_map);
                     if (PathMapper::SQL_CACHE.count(dataref)) {
                         path_dialect_cache[orig_path] = PathMapper::SQL_CACHE[dataref];
                     }
@@ -633,7 +783,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 if (it != path_dialect_cache.end()) {
                     PathMapper::SQL_CACHE["__path__" + orig_path] = it->second;
                 }
-                std::string new_path = PathMapper::transform_path(orig_path, mode, nullptr, "__path__" + orig_path);
+                std::string new_path = PathMapper::transform_path(orig_path, mode, nullptr, "__path__" + orig_path, folder_lang_map);
                 std::string escaped_new = escape_path(new_path);
                 std::string new_line = "D " + escaped_new + "\n";
                 fputs(new_line.c_str(), imp_pipe);
@@ -655,15 +805,19 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 #if IS_WINDOWS
     int status_exp = _pclose(exp_pipe);
     int status_imp = _pclose(imp_pipe);
+    bool ok_exp = (status_exp == 0);
+    bool ok_imp = (status_imp == 0);
 #else
     fclose(exp_pipe);
     fclose(imp_pipe);
     int status_exp = 0, status_imp = 0;
     waitpid(pid_exp, &status_exp, 0);
     waitpid(pid_imp, &status_imp, 0);
+    bool ok_exp = WIFEXITED(status_exp) && (WEXITSTATUS(status_exp) == 0);
+    bool ok_imp = WIFEXITED(status_imp) && (WEXITSTATUS(status_imp) == 0);
 #endif
 
-    if (status_exp != 0 || status_imp != 0) {
+    if (!ok_exp || !ok_imp) {
         std::cerr << "[-] Error: Git fast-export or fast-import process failed.\n";
         return;
     }
@@ -746,7 +900,7 @@ int main(int argc, char* argv[]) {
             std::cout << "============================================================\n";
             std::cout << "Select target migration layout:\n";
             std::cout << "  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)\n";
-            std::cout << "  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)\n";
+            std::cout << "  2. Language-first (e.g. Python/백준/..., Java/프로그래머스/...)\n";
             std::cout << "============================================================\n";
             std::cout << "Enter choice (1-2): ";
             std::string choice;

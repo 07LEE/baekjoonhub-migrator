@@ -116,7 +116,7 @@ class PathMapper:
         return 'MySQL'
 
     @classmethod
-    def transform_path(cls, path: str, mode: str, content_getter=None, blob_sha: str = None) -> str:
+    def transform_path(cls, path: str, mode: str, content_getter=None, blob_sha: str = None, folder_lang_map: Optional[Dict[str, str]] = None) -> str:
         """Transform a file path according to the selected migration mode.
 
         Args:
@@ -124,6 +124,7 @@ class PathMapper:
             mode: Migration mode ('platform_first', 'language_first', 'flat').
             content_getter: Optional callable to fetch blob content by sha.
             blob_sha: Git blob SHA of the file.
+            folder_lang_map: Optional map of parent_directory -> detected_language.
 
         Returns:
             Transformed relative file path.
@@ -139,11 +140,10 @@ class PathMapper:
             top_dir = 'Python'
         sub_parts = parts[1:]
 
-        # Helper to detect exact language from code file extension
-        code_file = next(
-            (p for p in reversed(parts) if p.lower() != 'readme.md' and os.path.splitext(p)[1]),
-            None
-        )
+        # Helper to detect exact language from code file extension (inspect ONLY the filename, not parent directories)
+        filename = parts[-1]
+        code_file = filename if (filename.lower() != 'readme.md' and os.path.splitext(filename)[1]) else None
+
         detected_lang = None
         if code_file:
             _, ext = os.path.splitext(code_file.lower())
@@ -162,15 +162,24 @@ class PathMapper:
             else:
                 detected_lang = cls.LANGUAGE_EXTENSIONS.get(ext)
 
+        # Fallback to folder_lang_map if language isn't directly detected from this file
+        if not detected_lang and folder_lang_map and len(parts) > 1:
+            if top_dir not in cls.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in cls.PLATFORMS:
+                problem_key = '/'.join(sub_parts[:-1])
+            else:
+                problem_key = '/'.join(parts[:-1])
+            detected_lang = folder_lang_map.get(problem_key)
+
         # Case A: Top directory is language, sub directory is platform
         if top_dir not in cls.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in cls.PLATFORMS:
             lang = detected_lang if detected_lang else top_dir
             platform = sub_parts[0]
             rel_path_parts = sub_parts[1:]
+
         # Case B: Top directory is platform (e.g. 백준/Bronze/...)
         elif top_dir in cls.PLATFORMS:
             platform = top_dir
-            lang = detected_lang if detected_lang else 'Python'
+            lang = detected_lang if detected_lang else 'Misc'
             rel_path_parts = sub_parts
         else:
             # Unrecognized pattern, return unchanged
@@ -401,14 +410,64 @@ class GitRewriter:
         Returns:
             Mapping of target_path -> list of original_paths.
         """
+        folder_lang_map = self.build_folder_lang_map(entries, content_getter=self.get_blob_content)
         mapped: Dict[str, List[str]] = {}
         for item_mode, item_type, blob_sha, old_path in entries:
             if item_type != 'blob':
                 continue
-            new_path = PathMapper.transform_path(old_path, mode, content_getter=self.get_blob_content, blob_sha=blob_sha)
+            new_path = PathMapper.transform_path(
+                old_path, mode,
+                content_getter=self.get_blob_content,
+                blob_sha=blob_sha,
+                folder_lang_map=folder_lang_map
+            )
             mapped.setdefault(new_path, []).append(old_path)
 
         return {k: v for k, v in mapped.items() if len(v) > 1}
+
+    def build_folder_lang_map(self, entries: List[Tuple[str, str, str, str]], content_getter=None) -> Dict[str, str]:
+        """Build mapping of normalized problem_directory -> detected_language from tree entries."""
+        folder_map: Dict[str, str] = {}
+        for item_mode, item_type, blob_sha, old_path in entries:
+            if item_type != 'blob':
+                continue
+            parts = [p for p in old_path.replace('\\', '/').split('/') if p]
+            if len(parts) <= 1:
+                continue
+            filename = parts[-1]
+            if filename.lower() == 'readme.md':
+                continue
+            _, ext = os.path.splitext(filename.lower())
+            if not ext:
+                continue
+
+            top_dir = parts[0]
+            sub_parts = parts[1:]
+            if top_dir not in PathMapper.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in PathMapper.PLATFORMS:
+                problem_key = '/'.join(sub_parts[:-1])
+            else:
+                problem_key = '/'.join(parts[:-1])
+
+            lang = None
+            if ext == '.sql':
+                if blob_sha and blob_sha in PathMapper.SQL_CACHE:
+                    lang = PathMapper.SQL_CACHE[blob_sha]
+                elif content_getter and blob_sha:
+                    try:
+                        content = content_getter(blob_sha)
+                        lang = PathMapper.detect_sql_dialect(content)
+                        PathMapper.SQL_CACHE[blob_sha] = lang
+                    except Exception:
+                        lang = 'MySQL'
+                else:
+                    lang = 'MySQL'
+            else:
+                lang = PathMapper.LANGUAGE_EXTENSIONS.get(ext)
+
+            if lang and problem_key not in folder_map:
+                folder_map[problem_key] = lang
+        return folder_map
+
 
     def preview_migration(self, mode: str) -> None:
         """Preview path changes for the latest commit tree.
@@ -423,6 +482,7 @@ class GitRewriter:
 
         latest_sha = commits[-1]
         entries = self.get_ls_tree(latest_sha)
+        folder_lang_map = self.build_folder_lang_map(entries, content_getter=self.get_blob_content)
 
         collisions = self.detect_collisions(entries, mode)
         if collisions:
@@ -436,7 +496,12 @@ class GitRewriter:
         print("=" * 60)
         changed_count = 0
         for _, item_type, blob_sha, path in entries[:20]:  # Show first 20 sample files
-            new_path = PathMapper.transform_path(path, mode, content_getter=self.get_blob_content, blob_sha=blob_sha)
+            new_path = PathMapper.transform_path(
+                path, mode,
+                content_getter=self.get_blob_content,
+                blob_sha=blob_sha,
+                folder_lang_map=folder_lang_map
+            )
             if new_path != path:
                 print(f" [MOVE] {path}\n     -> {new_path}")
                 changed_count += 1
@@ -472,6 +537,7 @@ class GitRewriter:
 
         sql_blob_cache: Dict[str, str] = {}
         path_dialect_cache: Dict[str, str] = {}
+        folder_lang_map: Dict[str, str] = {}
         state = 'FREE'
         blob_mark = ''
         pending_bytes = b''
@@ -554,10 +620,33 @@ class GitRewriter:
                             raw_path = rest[sp2 + 1:].strip()
                             orig_path = unescape_path(raw_path)
 
+                            # Populate folder_lang_map from non-README code files
+                            parts = [p for p in orig_path.replace('\\', '/').split('/') if p]
+                            if len(parts) > 1 and parts[-1].lower() != 'readme.md':
+                                filename = parts[-1]
+                                _, ext = os.path.splitext(filename.lower())
+                                if ext:
+                                    top_dir = parts[0]
+                                    sub_parts = parts[1:]
+                                    if top_dir not in PathMapper.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in PathMapper.PLATFORMS:
+                                        problem_key = '/'.join(sub_parts[:-1])
+                                    else:
+                                        problem_key = '/'.join(parts[:-1])
+
+                                    if ext == '.sql':
+                                        c_text = get_blob_content_from_cache(dataref)
+                                        l_found = PathMapper.detect_sql_dialect(c_text) if c_text else 'MySQL'
+                                    else:
+                                        l_found = PathMapper.LANGUAGE_EXTENSIONS.get(ext)
+                                    if l_found:
+                                        folder_lang_map[problem_key] = l_found
+
+
                             new_path = PathMapper.transform_path(
                                 orig_path, mode,
                                 content_getter=get_blob_content_from_cache,
-                                blob_sha=dataref
+                                blob_sha=dataref,
+                                folder_lang_map=folder_lang_map
                             )
                             if orig_path.lower().endswith('.sql') and dataref in PathMapper.SQL_CACHE:
                                 path_dialect_cache[orig_path] = PathMapper.SQL_CACHE[dataref]
@@ -575,10 +664,14 @@ class GitRewriter:
                             PathMapper.SQL_CACHE['__path__' + orig_path] = cached_dialect
                             new_path = PathMapper.transform_path(
                                 orig_path, mode,
-                                blob_sha='__path__' + orig_path
+                                blob_sha='__path__' + orig_path,
+                                folder_lang_map=folder_lang_map
                             )
                         else:
-                            new_path = PathMapper.transform_path(orig_path, mode)
+                            new_path = PathMapper.transform_path(
+                                orig_path, mode,
+                                folder_lang_map=folder_lang_map
+                            )
                         escaped_new = escape_path(new_path)
                         new_line = f"D {escaped_new}\n"
                         imp_stdin.write(new_line.encode('utf-8'))
@@ -690,7 +783,7 @@ def main():
                 print("=" * 60)
                 print("Select target migration layout:")
                 print("  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)")
-                print("  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)")
+                print("  2. Language-first (e.g. Python/백준/..., Java/프로그래머스/...)")
                 print("=" * 60)
 
                 choice = input("Enter choice (1-2): ").strip()

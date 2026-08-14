@@ -14,8 +14,10 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
 2. Flexible Directory Layouts
    - Platform-first: `백준/...`, `프로그래머스/...`, `SWEA/...`
    - Language-first: `Python/백준/...`, `Java/프로그래머스/...`
+   - Flat: `백준/...` (Platform-focused flat layout)
 
-3. Programmers Difficulty Level Normalization
+3. Automatic Directory Normalization
+   - Standardizes legacy `Python3/` directory names to `Python`.
    - Standardizes level directory names (e.g. `lv1` -> `1`, `2`, `3`) to align with BaekjoonHub specifications.
 
 4. Execution Environments (Python & C++)

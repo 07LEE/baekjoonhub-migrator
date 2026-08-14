@@ -13,6 +13,7 @@ import subprocess
 import argparse
 import tempfile
 import shutil
+from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 
@@ -22,6 +23,20 @@ def is_remote_url(path: str) -> bool:
     Supports HTTP, HTTPS, SSH, and git protocols.
     """
     return path.startswith(('http://', 'https://', 'git@', 'ssh://'))
+
+
+def is_git_repo(path: str) -> bool:
+    """Check if the directory is a valid Git repository (supports bare repos & worktrees)."""
+    try:
+        res = subprocess.run(
+            ['git', '-C', path, 'rev-parse', '--git-dir'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 
 # Reconfigure stdout and stderr to handle UTF-8 and special unicode characters (like \u2005) on Windows
@@ -55,7 +70,6 @@ class PathMapper:
         '.gs': 'Golfscript',
     }
 
-
     PLATFORMS = {'백준', '프로그래머스', 'SWEA', 'goormlevel', 'LEETCODE'}
 
     @classmethod
@@ -66,11 +80,10 @@ class PathMapper:
             filename: Name of the code file.
 
         Returns:
-            Language folder name or 'Unknown'.
+            Language folder name or 'Misc'.
         """
         _, ext = os.path.splitext(filename.lower())
         return cls.LANGUAGE_EXTENSIONS.get(ext, 'Misc')
-
 
     SQL_CACHE: Dict[str, str] = {}
 
@@ -85,13 +98,21 @@ class PathMapper:
             'Oracle' or 'MySQL'.
         """
         upper_content = content.upper()
-        oracle_keywords = ['NVL', 'SYSDATE', 'TO_CHAR', 'TO_DATE', 'DECODE', 'ROWNUM', 'VARCHAR2', 'NUMBER', 'CONNECT BY']
-        mysql_keywords = ['IFNULL', 'DATE_FORMAT', 'NOW()', 'LIMIT', 'CONCAT', 'GROUP_CONCAT']
+        oracle_keywords = [
+            r'\bNVL\b', r'\bSYSDATE\b', r'\bTO_CHAR\b', r'\bTO_DATE\b',
+            r'\bDECODE\b', r'\bROWNUM\b', r'\bVARCHAR2\b', r'\bCONNECT\s+BY\b'
+        ]
+        mysql_keywords = [
+            r'\bIFNULL\b', r'\bDATE_FORMAT\b', r'\bNOW\s*\(', r'\bLIMIT\b',
+            r'\bCONCAT\b', r'\bGROUP_CONCAT\b'
+        ]
 
-        if any(kw in upper_content for kw in oracle_keywords):
-            return 'Oracle'
-        if any(kw in upper_content for kw in mysql_keywords):
-            return 'MySQL'
+        for kw in oracle_keywords:
+            if re.search(kw, upper_content):
+                return 'Oracle'
+        for kw in mysql_keywords:
+            if re.search(kw, upper_content):
+                return 'MySQL'
         return 'MySQL'
 
     @classmethod
@@ -118,7 +139,6 @@ class PathMapper:
             top_dir = 'Python'
         sub_parts = parts[1:]
 
-
         # Helper to detect exact language from code file extension
         code_file = next(
             (p for p in reversed(parts) if p.lower() != 'readme.md' and os.path.splitext(p)[1]),
@@ -142,7 +162,6 @@ class PathMapper:
             else:
                 detected_lang = cls.LANGUAGE_EXTENSIONS.get(ext)
 
-
         # Case A: Top directory is language, sub directory is platform
         if top_dir not in cls.PLATFORMS and len(sub_parts) >= 1 and sub_parts[0] in cls.PLATFORMS:
             lang = detected_lang if detected_lang else top_dir
@@ -153,10 +172,10 @@ class PathMapper:
             platform = top_dir
             lang = detected_lang if detected_lang else 'Python'
             rel_path_parts = sub_parts
-
         else:
             # Unrecognized pattern, return unchanged
             return path
+
         # Normalize Programmers level folders to strictly match BaekjoonHub's actual behavior (e.g., 'lv1' -> '1')
         if platform == '프로그래머스' and rel_path_parts:
             level_dir = rel_path_parts[0]
@@ -171,11 +190,59 @@ class PathMapper:
         elif mode == 'language_first':
             # Format: <Language>/<Platform>/<Remaining_Path>
             new_parts = [lang, platform] + rel_path_parts
+        elif mode == 'flat':
+            new_parts = [platform] + rel_path_parts
         else:
             new_parts = parts
 
-
         return '/'.join(new_parts)
+
+
+def unescape_path(path_str: str) -> str:
+    """Unescape C-style quoted git fast-export path strings."""
+    if len(path_str) >= 2 and path_str.startswith('"') and path_str.endswith('"'):
+        inner = path_str[1:-1]
+        res = bytearray()
+        i = 0
+        n = len(inner)
+        while i < n:
+            if inner[i] == '\\' and i + 1 < n:
+                nxt = inner[i + 1]
+                if nxt.isdigit() and i + 3 < n and inner[i + 2].isdigit() and inner[i + 3].isdigit():
+                    oct_val = int(inner[i + 1:i + 4], 8)
+                    res.append(oct_val)
+                    i += 4
+                else:
+                    escapes = {'n': 10, 't': 9, 'v': 11, 'b': 8, 'r': 13, 'f': 12, 'a': 7, '\\': 92, '"': 34}
+                    res.append(escapes.get(nxt, ord(nxt)))
+                    i += 2
+            else:
+                res.append(ord(inner[i]))
+                i += 1
+        return res.decode('utf-8', errors='replace')
+    return path_str
+
+
+def escape_path(path_str: str) -> str:
+    """Escape path string for git fast-import format if it contains spaces or quotes."""
+    needs_quoting = any(c in path_str for c in ' \t\n"\\')
+    if not needs_quoting:
+        return path_str
+
+    escaped = '"'
+    for c in path_str:
+        if c == '"':
+            escaped += '\\"'
+        elif c == '\\':
+            escaped += '\\\\'
+        elif c == '\n':
+            escaped += '\\n'
+        elif c == '\t':
+            escaped += '\\t'
+        else:
+            escaped += c
+    escaped += '"'
+    return escaped
 
 
 class GitRewriter:
@@ -223,18 +290,24 @@ class GitRewriter:
         )
         return res.stdout
 
-    def create_backup_branch(self, branch_name: str = 'backup-before-migration') -> None:
-        """Create a safety backup branch before starting history rewrite.
+    def create_backup_branch(self, base_name: str = 'backup-before-migration') -> str:
+        """Create a safety backup branch before starting history rewrite, preserving old backups.
 
         Args:
-            branch_name: Name of the backup branch.
+            base_name: Base name for the backup branch.
+
+        Returns:
+            The created backup branch name.
         """
-        try:
-            self._run_git(['branch', '-D', branch_name])
-        except subprocess.CalledProcessError:
-            pass
+        branch_name = base_name
+        existing_branches = self._run_git(['branch', '--list', base_name]).strip()
+        if existing_branches:
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            branch_name = f"{base_name}-{timestamp}"
+
         self._run_git(['branch', branch_name])
         print(f"[+] Backup branch created: '{branch_name}'")
+        return branch_name
 
     def get_commit_list(self) -> List[str]:
         """Fetch list of all commits in chronological order (oldest first).
@@ -246,7 +319,7 @@ class GitRewriter:
         return [line.strip() for line in out.splitlines() if line.strip()]
 
     def get_commit_meta(self, commit_sha: str) -> Dict[str, str]:
-        """Extract exact author, committer, and message metadata for a commit.
+        """Extract exact author, committer, dates (with raw offset), parents, and message metadata.
 
         Args:
             commit_sha: SHA of the target commit.
@@ -254,19 +327,20 @@ class GitRewriter:
         Returns:
             Dictionary containing commit metadata.
         """
-        # Format specifiers: %an, %ae, %at, %cn, %ce, %ct, %B
         sep = '---COMMIT_META_SEP---'
-        fmt = f'%an{sep}%ae{sep}%at{sep}%cn{sep}%ce{sep}%ct{sep}%B'
-        raw = self._run_git(['log', '-1', f'--format={fmt}', commit_sha])
+        fmt = f'%an{sep}%ae{sep}%ad{sep}%cn{sep}%ce{sep}%cd{sep}%P{sep}%B'
+        raw = self._run_git(['log', '-1', '--date=raw', f'--format={fmt}', commit_sha])
         parts = raw.split(sep)
+        msg = parts[7] if len(parts) > 7 else ''
         return {
             'an': parts[0],
             'ae': parts[1],
-            'at': parts[2],
+            'ad': parts[2],
             'cn': parts[3],
             'ce': parts[4],
-            'ct': parts[5],
-            'msg': parts[6] if len(parts) > 6 else ''
+            'cd': parts[5],
+            'parents': parts[6].split() if parts[6].strip() else [],
+            'msg': msg.rstrip('\r\n') + '\n'
         }
 
     def get_ls_tree(self, commit_sha: str) -> List[Tuple[str, str, str, str]]:
@@ -283,7 +357,6 @@ class GitRewriter:
         for line in raw.split('\0'):
             if not line:
                 continue
-            # Format: <mode> <type> <sha>\t<path>
             meta, path = line.split('\t', 1)
             mode, item_type, sha = meta.split()
             entries.append((mode, item_type, sha, path))
@@ -300,6 +373,21 @@ class GitRewriter:
         """
         return self._run_git(['cat-file', '-p', blob_sha])
 
+    def detect_collisions(self, entries: List[Tuple[str, str, str, str]], mode: str) -> Dict[str, List[str]]:
+        """Detect path collisions where multiple old paths map to the same target path.
+
+        Returns:
+            Mapping of target_path -> list of original_paths.
+        """
+        mapped: Dict[str, List[str]] = {}
+        for item_mode, item_type, blob_sha, old_path in entries:
+            if item_type != 'blob':
+                continue
+            new_path = PathMapper.transform_path(old_path, mode, content_getter=self.get_blob_content, blob_sha=blob_sha)
+            mapped.setdefault(new_path, []).append(old_path)
+
+        return {k: v for k, v in mapped.items() if len(v) > 1}
+
     def preview_migration(self, mode: str) -> None:
         """Preview path changes for the latest commit tree.
 
@@ -313,7 +401,14 @@ class GitRewriter:
 
         latest_sha = commits[-1]
         entries = self.get_ls_tree(latest_sha)
-        
+
+        collisions = self.detect_collisions(entries, mode)
+        if collisions:
+            print("\n[!] WARNING: PATH COLLISIONS DETECTED!")
+            for target_path, orig_paths in collisions.items():
+                print(f"    Target: '{target_path}' <= {orig_paths}")
+            print("    (Note: During rewrite, git update-index will overwrite colliding paths with the last entry.)\n")
+
         print("\n" + "=" * 60)
         print(f" DRY-RUN PREVIEW (Mode: {mode})")
         print("=" * 60)
@@ -331,96 +426,146 @@ class GitRewriter:
         print("=" * 60 + "\n")
 
     def execute_rewrite(self, mode: str, target_branch: str = 'main') -> None:
-        """Execute history rewrite preserving original timestamps and commit messages.
+        """Execute history rewrite using fast-export / fast-import pipeline, matching C++ implementation.
 
         Args:
             mode: Migration mode selected by user.
             target_branch: Target branch to update after rewriting.
         """
-        commits = self.get_commit_list()
-        if not commits:
-            print("[-] No commits to process.")
-            return
-
-        print(f"[+] Starting Git history rewrite for {len(commits)} commits...")
-        self.create_backup_branch()
-
-        commit_map: Dict[str, str] = {}  # old_commit_sha -> new_commit_sha
-        parent_new_sha: Optional[str] = None
-        tmp_index_file = os.path.join(self.repo_dir, '.git', 'migrator_tmp_index')
-
-        try:
-            for idx, old_sha in enumerate(commits, start=1):
-                meta = self.get_commit_meta(old_sha)
-                ls_entries = self.get_ls_tree(old_sha)
-
-                # Clean up temporary index file
-                if os.path.exists(tmp_index_file):
-                    os.remove(tmp_index_file)
-
-                index_env = {'GIT_INDEX_FILE': tmp_index_file}
-
-                # Build batch input for git update-index -z --index-info
-                # Format: <mode> SP <sha> TAB <path> NUL
-                index_info_lines = []
-                for item_mode, item_type, blob_sha, old_path in ls_entries:
-                    if item_type != 'blob':
-                        continue
-                    new_path = PathMapper.transform_path(old_path, mode, content_getter=self.get_blob_content, blob_sha=blob_sha)
-                    index_info_lines.append(f"{item_mode} {blob_sha}\t{new_path}")
-
-                if index_info_lines:
-                    batch_input = '\0'.join(index_info_lines) + '\0'
-                    self._run_git(['update-index', '-z', '--index-info'], env=index_env, input_str=batch_input)
-
-
-
-
-                # Generate new tree sha from temporary index
-                new_tree_sha = self._run_git(['write-tree'], env=index_env).strip()
-
-                # Environment variables for commit creation (preserving original dates and authors)
-                commit_env = {
-                    'GIT_AUTHOR_NAME': meta['an'],
-                    'GIT_AUTHOR_EMAIL': meta['ae'],
-                    'GIT_AUTHOR_DATE': meta['at'],
-                    'GIT_COMMITTER_NAME': meta['cn'],
-                    'GIT_COMMITTER_EMAIL': meta['ce'],
-                    'GIT_COMMITTER_DATE': meta['ct'],
-                }
-
-                # Build commit-tree arguments
-                cmd_args = ['commit-tree', new_tree_sha]
-                if parent_new_sha:
-                    cmd_args.extend(['-p', parent_new_sha])
-
-                new_commit_sha = self._run_git(cmd_args, env=commit_env, input_str=meta['msg']).strip()
-
-                commit_map[old_sha] = new_commit_sha
-                parent_new_sha = new_commit_sha
-
-                if idx % 50 == 0 or idx == len(commits):
-                    print(f" Progress: [{idx}/{len(commits)}] commits processed.")
-
-
-        finally:
-            if os.path.exists(tmp_index_file):
-                try:
-                    os.remove(tmp_index_file)
-                except OSError:
-                    pass
-
-        # Point target branch to the newly rewritten commit chain
         current_branch = self._run_git(['rev-parse', '--abbrev-ref', 'HEAD']).strip()
-        if current_branch == 'HEAD':
+        if current_branch == 'HEAD' or not current_branch:
             current_branch = target_branch
 
-        self._run_git(['update-ref', f'refs/heads/{current_branch}', parent_new_sha])
+        print(f"[+] Starting Git history rewrite for branch '{current_branch}'...")
+        backup_branch = self.create_backup_branch()
+
+        export_cmd = ['git', '-C', self.repo_dir, 'fast-export', current_branch]
+        import_cmd = ['git', '-C', self.repo_dir, 'fast-import', '--force', '--quiet']
+
+        proc_export = subprocess.Popen(export_cmd, stdout=subprocess.PIPE, bufsize=0)
+        proc_import = subprocess.Popen(import_cmd, stdin=subprocess.PIPE, bufsize=0)
+
+        exp_stdout = proc_export.stdout
+        imp_stdin = proc_import.stdin
+
+        sql_blob_cache: Dict[str, str] = {}
+        path_dialect_cache: Dict[str, str] = {}
+        state = 'FREE'
+        blob_mark = ''
+
+        def get_blob_content_from_cache(ref: str) -> str:
+            return sql_blob_cache.get(ref, '')
+
+        try:
+            while True:
+                line_bytes = exp_stdout.readline()
+                if not line_bytes:
+                    break
+                line_str = line_bytes.decode('utf-8', errors='replace')
+
+                if state == 'FREE':
+                    if line_str.startswith('blob\n'):
+                        imp_stdin.write(line_bytes)
+                        state = 'BLOB_MARK'
+                    elif line_str.startswith('commit '):
+                        imp_stdin.write(line_bytes)
+                        state = 'COMMIT'
+                    else:
+                        imp_stdin.write(line_bytes)
+
+                elif state == 'BLOB_MARK':
+                    imp_stdin.write(line_bytes)
+                    if line_str.startswith('mark '):
+                        blob_mark = line_str[5:].strip()
+                        state = 'BLOB_DATA_HEADER'
+                    else:
+                        blob_mark = ''
+                        state = 'FREE'
+
+                elif state == 'BLOB_DATA_HEADER':
+                    imp_stdin.write(line_bytes)
+                    if line_str.startswith('data '):
+                        size = int(line_str[5:].strip())
+                        content_bytes = exp_stdout.read(size)
+                        imp_stdin.write(content_bytes)
+                        nl = exp_stdout.read(1)
+                        if nl:
+                            imp_stdin.write(nl)
+                        if blob_mark and size < 1024 * 1024:
+                            sql_blob_cache[blob_mark] = content_bytes.decode('utf-8', errors='replace')
+                        blob_mark = ''
+                        state = 'FREE'
+                    else:
+                        state = 'FREE'
+
+                elif state == 'COMMIT':
+                    if line_str.startswith('data '):
+                        imp_stdin.write(line_bytes)
+                        size = int(line_str[5:].strip())
+                        msg_bytes = exp_stdout.read(size)
+                        imp_stdin.write(msg_bytes)
+                        nl = exp_stdout.read(1)
+                        if nl:
+                            imp_stdin.write(nl)
+                    elif line_str.startswith('M '):
+                        rest = line_str[2:]
+                        sp1 = rest.find(' ')
+                        sp2 = rest.find(' ', sp1 + 1)
+                        if sp1 != -1 and sp2 != -1:
+                            fmode = rest[:sp1]
+                            dataref = rest[sp1 + 1:sp2]
+                            raw_path = rest[sp2 + 1:].strip()
+                            orig_path = unescape_path(raw_path)
+
+                            new_path = PathMapper.transform_path(
+                                orig_path, mode,
+                                content_getter=get_blob_content_from_cache,
+                                blob_sha=dataref
+                            )
+                            if orig_path.lower().endswith('.sql') and dataref in PathMapper.SQL_CACHE:
+                                path_dialect_cache[orig_path] = PathMapper.SQL_CACHE[dataref]
+
+                            escaped_new = escape_path(new_path)
+                            new_line = f"M {fmode} {dataref} {escaped_new}\n"
+                            imp_stdin.write(new_line.encode('utf-8'))
+                        else:
+                            imp_stdin.write(line_bytes)
+                    elif line_str.startswith('D '):
+                        raw_path = line_str[2:].strip()
+                        orig_path = unescape_path(raw_path)
+                        cached_dialect = path_dialect_cache.get(orig_path)
+                        if cached_dialect:
+                            PathMapper.SQL_CACHE['__path__' + orig_path] = cached_dialect
+                            new_path = PathMapper.transform_path(
+                                orig_path, mode,
+                                blob_sha='__path__' + orig_path
+                            )
+                        else:
+                            new_path = PathMapper.transform_path(orig_path, mode)
+                        escaped_new = escape_path(new_path)
+                        new_line = f"D {escaped_new}\n"
+                        imp_stdin.write(new_line.encode('utf-8'))
+                    elif line_str.startswith('blob\n'):
+                        imp_stdin.write(line_bytes)
+                        state = 'BLOB_MARK'
+                    elif line_str.startswith('commit '):
+                        imp_stdin.write(line_bytes)
+                        state = 'COMMIT'
+                    elif line_str.startswith(('reset ', 'tag ', 'checkpoint\n')):
+                        imp_stdin.write(line_bytes)
+                        state = 'FREE'
+                    else:
+                        imp_stdin.write(line_bytes)
+
+        finally:
+            exp_stdout.close()
+            imp_stdin.close()
+            proc_export.wait()
+            proc_import.wait()
+
         self._run_git(['checkout', '-f', current_branch])
-
         print(f"\n[+] Migration successfully finished! Branch '{current_branch}' now points to rewritten history.")
-        print("[+] Original history backed up in 'backup-before-migration'.")
-
+        print(f"[+] Original history backed up in '{backup_branch}'.")
 
 
 def main():
@@ -437,13 +582,18 @@ def main():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['platform_first', 'language_first'],
-        help="Migration mode: 'platform_first' or 'language_first'"
+        choices=['platform_first', 'language_first', 'flat'],
+        help="Migration mode: 'platform_first', 'language_first', or 'flat'"
     )
     parser.add_argument(
         '--dry-run',
         action='store_true',
         help="Preview changes without Modifying Git history"
+    )
+    parser.add_argument(
+        '-y', '--yes',
+        action='store_true',
+        help="Skip interactive confirmation prompts"
     )
 
     args = parser.parse_args()
@@ -455,7 +605,10 @@ def main():
         is_remote = True
     else:
         repo_dir = os.path.abspath(repo_input)
-        if not os.path.exists(os.path.join(repo_dir, '.git')):
+        if not is_git_repo(repo_dir):
+            if args.yes:
+                print(f"[-] Error: '{repo_dir}' is not a valid Git repository.")
+                sys.exit(1)
             print(f"[*] Note: '{repo_dir}' is not a Git repository.")
             user_repo = input("Please enter the path or URL to target Git repository: ").strip().strip('"').strip("'")
             if user_repo:
@@ -465,7 +618,7 @@ def main():
                 else:
                     repo_dir = os.path.abspath(user_repo)
 
-    if not is_remote and not os.path.exists(os.path.join(repo_dir, '.git')):
+    if not is_remote and not is_git_repo(repo_dir):
         print(f"[-] Error: '{repo_dir}' is not a valid Git repository.")
         sys.exit(1)
 
@@ -486,37 +639,46 @@ def main():
     try:
         rewriter = GitRewriter(repo_dir)
 
-        # Interactive mode if arguments are missing
         selected_mode = args.mode
         if not selected_mode:
-            print("=" * 60)
-            print(" BaekjoonHub Migration Tool ")
-            print("=" * 60)
-            print("Select target migration layout:")
-            print("  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)")
-            print("  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)")
-            print("=" * 60)
+            if args.yes:
+                selected_mode = 'platform_first'
+            else:
+                print("=" * 60)
+                print(" BaekjoonHub Migration Tool ")
+                print("=" * 60)
+                print("Select target migration layout:")
+                print("  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)")
+                print("  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)")
+                print("=" * 60)
 
-            choice = input("Enter choice (1-2): ").strip()
-            mode_map = {'1': 'platform_first', '2': 'language_first'}
-            selected_mode = mode_map.get(choice, 'platform_first')
+                choice = input("Enter choice (1-2): ").strip()
+                mode_map = {'1': 'platform_first', '2': 'language_first'}
+                selected_mode = mode_map.get(choice, 'platform_first')
 
         if args.dry_run:
             rewriter.preview_migration(selected_mode)
             return
 
-        # Interactive confirmation if dry-run wasn't specified via CLI
         rewriter.preview_migration(selected_mode)
-        confirm = input("Do you want to proceed with rewriting Git history? (y/N): ").strip().lower()
+        if args.yes:
+            confirm = 'y'
+        else:
+            confirm = input("Do you want to proceed with rewriting Git history? (y/N): ").strip().lower()
+
         if confirm == 'y':
             rewriter.execute_rewrite(selected_mode)
-            
+
             if is_remote:
-                print("\n" + "=" * 60)
-                print(" REMOTE PUSH CONFIRMATION")
-                print("=" * 60)
-                print("WARNING: Force pushing will overwrite the remote repository history.")
-                push_confirm = input("Do you want to force push the changes to remote? (y/N): ").strip().lower()
+                if args.yes:
+                    push_confirm = 'n'
+                else:
+                    print("\n" + "=" * 60)
+                    print(" REMOTE PUSH CONFIRMATION")
+                    print("=" * 60)
+                    print("WARNING: Force pushing will overwrite the remote repository history.")
+                    push_confirm = input("Do you want to force push the changes to remote? (y/N): ").strip().lower()
+
                 if push_confirm == 'y':
                     try:
                         current_branch = rewriter._run_git(['rev-parse', '--abbrev-ref', 'HEAD']).strip()

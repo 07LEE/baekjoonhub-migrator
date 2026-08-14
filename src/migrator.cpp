@@ -12,6 +12,9 @@
 #include <cctype>
 #include <cstring>
 #include <functional>
+#include <regex>
+#include <chrono>
+#include <ctime>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -53,6 +56,110 @@ std::string trim(const std::string& s) {
     return s.substr(start, end - start + 1);
 }
 
+struct GitCmdResult {
+    int exit_code;
+    std::string stdout_str;
+    std::string stderr_str;
+};
+
+// Execute git command safely without shell injection
+GitCmdResult run_git_exec(const std::string& repo_dir, const std::vector<std::string>& args, const std::string& input_str = "") {
+    GitCmdResult res = { -1, "", "" };
+#if IS_WINDOWS
+    std::string cmd = "git -C \"" + repo_dir + "\"";
+    for (const auto& arg : args) {
+        cmd += " \"" + arg + "\"";
+    }
+    FILE* pipe = _popen(cmd.c_str(), "r");
+    if (!pipe) return res;
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        res.stdout_str += buffer;
+    }
+    res.exit_code = _pclose(pipe);
+    return res;
+#else
+    int pipe_out[2];
+    int pipe_in[2];
+    if (pipe(pipe_out) < 0) return res;
+    bool has_input = !input_str.empty();
+    if (has_input && pipe(pipe_in) < 0) {
+        close(pipe_out[0]); close(pipe_out[1]);
+        return res;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipe_out[0]); close(pipe_out[1]);
+        if (has_input) { close(pipe_in[0]); close(pipe_in[1]); }
+        return res;
+    }
+
+    if (pid == 0) {
+        close(pipe_out[0]);
+        dup2(pipe_out[1], STDOUT_FILENO);
+        close(pipe_out[1]);
+
+        if (has_input) {
+            close(pipe_in[1]);
+            dup2(pipe_in[0], STDIN_FILENO);
+            close(pipe_in[0]);
+        }
+
+        std::vector<char*> argv_ptrs;
+        std::string git_str = "git";
+        std::string c_flag = "-C";
+        argv_ptrs.push_back(const_cast<char*>(git_str.c_str()));
+        argv_ptrs.push_back(const_cast<char*>(c_flag.c_str()));
+        argv_ptrs.push_back(const_cast<char*>(repo_dir.c_str()));
+        for (const auto& arg : args) {
+            argv_ptrs.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv_ptrs.push_back(nullptr);
+
+        execvp("git", argv_ptrs.data());
+        exit(127);
+    }
+
+    close(pipe_out[1]);
+    if (has_input) {
+        close(pipe_in[0]);
+        ssize_t bytes_written = 0;
+        ssize_t total = input_str.length();
+        while (bytes_written < total) {
+            ssize_t w = write(pipe_in[1], input_str.c_str() + bytes_written, total - bytes_written);
+            if (w <= 0) break;
+            bytes_written += w;
+        }
+        close(pipe_in[1]);
+    }
+
+    char buffer[4096];
+    ssize_t n;
+    while ((n = read(pipe_out[0], buffer, sizeof(buffer))) > 0) {
+        res.stdout_str.append(buffer, n);
+    }
+    close(pipe_out[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        res.exit_code = WEXITSTATUS(status);
+    }
+    return res;
+#endif
+}
+
+std::string run_git_command(const std::string& repo_dir, const std::vector<std::string>& args) {
+    GitCmdResult res = run_git_exec(repo_dir, args);
+    return res.stdout_str;
+}
+
+bool is_git_repo(const std::string& path) {
+    GitCmdResult res = run_git_exec(path, {"rev-parse", "--git-dir"});
+    return res.exit_code == 0;
+}
+
 class PathMapper {
 public:
     static inline const std::unordered_map<std::string, std::string> LANGUAGE_EXTENSIONS = {
@@ -85,17 +192,21 @@ public:
     static std::string detect_sql_dialect(const std::string& content) {
         std::string upper_content = to_upper(content);
         std::vector<std::string> oracle_keywords = {
-            "NVL", "SYSDATE", "TO_CHAR", "TO_DATE", "DECODE", "ROWNUM", "VARCHAR2", "NUMBER", "CONNECT BY"
+            "\\bNVL\\b", "\\bSYSDATE\\b", "\\bTO_CHAR\\b", "\\bTO_DATE\\b",
+            "\\bDECODE\\b", "\\bROWNUM\\b", "\\bVARCHAR2\\b", "\\bCONNECT\\s+BY\\b"
         };
         std::vector<std::string> mysql_keywords = {
-            "IFNULL", "DATE_FORMAT", "NOW()", "LIMIT", "CONCAT", "GROUP_CONCAT"
+            "\\bIFNULL\\b", "\\bDATE_FORMAT\\b", "\\bNOW\\s*\\(", "\\bLIMIT\\b",
+            "\\bCONCAT\\b", "\\bGROUP_CONCAT\\b"
         };
 
         for (const auto& kw : oracle_keywords) {
-            if (upper_content.find(kw) != std::string::npos) return "Oracle";
+            std::regex re(kw);
+            if (std::regex_search(upper_content, re)) return "Oracle";
         }
         for (const auto& kw : mysql_keywords) {
-            if (upper_content.find(kw) != std::string::npos) return "MySQL";
+            std::regex re(kw);
+            if (std::regex_search(upper_content, re)) return "MySQL";
         }
         return "MySQL";
     }
@@ -191,7 +302,7 @@ public:
         }
 
         std::vector<std::string> new_parts;
-        if (mode == "platform_first") {
+        if (mode == "platform_first" || mode == "flat") {
             new_parts.push_back(platform);
             new_parts.insert(new_parts.end(), rel_path_parts.begin(), rel_path_parts.end());
         } else if (mode == "language_first") {
@@ -273,34 +384,20 @@ std::string escape_path(const std::string& path_str) {
     return escaped;
 }
 
-// Git Rewriter Helper Functions
-std::string run_git_command(const std::string& repo_dir, const std::vector<std::string>& args) {
-    std::string cmd = "git -C \"" + repo_dir + "\"";
-    for (const auto& arg : args) {
-        cmd += " \"" + arg + "\"";
+std::string create_backup_branch(const std::string& repo_dir, const std::string& base_name = "backup-before-migration") {
+    std::string existing = trim(run_git_command(repo_dir, {"branch", "--list", base_name}));
+    std::string branch_name = base_name;
+    if (!existing.empty()) {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", std::localtime(&t));
+        branch_name = base_name + "-" + std::string(buf);
     }
 
-#if IS_WINDOWS
-    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-
-    if (!pipe) return "";
-
-    char buffer[4096];
-    std::string result = "";
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
-    }
-
-#if IS_WINDOWS
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
-
-    return result;
+    run_git_command(repo_dir, {"branch", branch_name});
+    std::cout << "[+] Backup branch created: '" << branch_name << "'\n";
+    return branch_name;
 }
 
 void preview_migration(const std::string& repo_dir, const std::string& mode) {
@@ -319,13 +416,12 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     }
 
     std::string latest_sha = commits.back();
-    std::string tree_out = run_git_command(repo_dir, {"ls-tree", "-r", latest_sha});
+    std::string tree_out = run_git_command(repo_dir, {"ls-tree", "-r", "-z", latest_sha});
 
     std::cout << "\n============================================================\n";
     std::cout << " DRY-RUN PREVIEW (Mode: " << mode << ")\n";
     std::cout << "============================================================\n";
 
-    std::stringstream tss(tree_out);
     int count = 0;
     int changed_count = 0;
     int total_files = 0;
@@ -334,14 +430,20 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         return run_git_command(repo_dir, {"cat-file", "-p", sha});
     };
 
-    while (std::getline(tss, line)) {
-        if (line.empty()) continue;
+    size_t pos = 0;
+    while (pos < tree_out.length()) {
+        size_t null_pos = tree_out.find('\0', pos);
+        if (null_pos == std::string::npos) break;
+        std::string entry_str = tree_out.substr(pos, null_pos - pos);
+        pos = null_pos + 1;
+
+        if (entry_str.empty()) continue;
         total_files++;
-        size_t tab_pos = line.find('\t');
+        size_t tab_pos = entry_str.find('\t');
         if (tab_pos == std::string::npos) continue;
 
-        std::string meta = line.substr(0, tab_pos);
-        std::string path = line.substr(tab_pos + 1);
+        std::string meta = entry_str.substr(0, tab_pos);
+        std::string path = entry_str.substr(tab_pos + 1);
 
         std::stringstream mss(meta);
         std::string mode_str, item_type, sha;
@@ -370,11 +472,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     }
 
     std::cout << "[+] Starting Git history rewrite for branch '" << current_branch << "'...\n";
-
-    // Create backup branch
-    run_git_command(repo_dir, {"branch", "-D", "backup-before-migration"});
-    run_git_command(repo_dir, {"branch", "backup-before-migration"});
-    std::cout << "[+] Backup branch created: 'backup-before-migration'\n";
+    std::string backup_branch = create_backup_branch(repo_dir);
 
     std::string export_cmd = "git -C \"" + repo_dir + "\" fast-export \"" + current_branch + "\"";
     std::string import_cmd = "git -C \"" + repo_dir + "\" fast-import --force --quiet";
@@ -422,6 +520,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 #endif
 
     std::unordered_map<std::string, std::string> sql_blob_cache;
+    std::unordered_map<std::string, std::string> path_dialect_cache;
     enum State { FREE, BLOB_MARK, BLOB_DATA_HEADER, COMMIT };
     State state = FREE;
     std::string blob_mark = "";
@@ -495,8 +594,11 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     };
 
                     std::string new_path = PathMapper::transform_path(orig_path, mode, content_getter, dataref);
-                    std::string escaped_new = escape_path(new_path);
+                    if (PathMapper::SQL_CACHE.count(dataref)) {
+                        path_dialect_cache[orig_path] = PathMapper::SQL_CACHE[dataref];
+                    }
 
+                    std::string escaped_new = escape_path(new_path);
                     std::string new_line = "M " + fmode + " " + dataref + " " + escaped_new + "\n";
                     fputs(new_line.c_str(), imp_pipe);
                 } else {
@@ -505,7 +607,11 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             } else if (line_str.rfind("D ", 0) == 0) {
                 std::string raw_path = trim(line_str.substr(2));
                 std::string orig_path = unescape_path(raw_path);
-                std::string new_path = PathMapper::transform_path(orig_path, mode);
+                auto it = path_dialect_cache.find(orig_path);
+                if (it != path_dialect_cache.end()) {
+                    PathMapper::SQL_CACHE["__path__" + orig_path] = it->second;
+                }
+                std::string new_path = PathMapper::transform_path(orig_path, mode, nullptr, "__path__" + orig_path);
                 std::string escaped_new = escape_path(new_path);
                 std::string new_line = "D " + escaped_new + "\n";
                 fputs(new_line.c_str(), imp_pipe);
@@ -536,13 +642,14 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     run_git_command(repo_dir, {"checkout", "-f", current_branch});
     std::cout << "\n[+] Migration successfully finished! Branch '" << current_branch << "' now points to rewritten history.\n";
-    std::cout << "[+] Original history backed up in 'backup-before-migration'.\n";
+    std::cout << "[+] Original history backed up in '" << backup_branch << "'.\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string repo_input = fs::current_path().string();
     std::string mode = "";
     bool dry_run = false;
+    bool yes_flag = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -552,6 +659,8 @@ int main(int argc, char* argv[]) {
             mode = argv[++i];
         } else if (arg == "--dry-run") {
             dry_run = true;
+        } else if (arg == "-y" || arg == "--yes") {
+            yes_flag = true;
         }
     }
 
@@ -561,7 +670,11 @@ int main(int argc, char* argv[]) {
 
     if (!is_remote) {
         repo_dir = fs::absolute(repo_input).string();
-        if (!fs::exists(fs::path(repo_dir) / ".git")) {
+        if (!is_git_repo(repo_dir)) {
+            if (yes_flag) {
+                std::cerr << "[-] Error: '" << repo_dir << "' is not a valid Git repository.\n";
+                return 1;
+            }
             std::cout << "[*] Note: '" << repo_dir << "' is not a Git repository.\n";
             std::cout << "Please enter the path or URL to target Git repository: ";
             std::string user_repo;
@@ -578,17 +691,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (!is_remote && !fs::exists(fs::path(repo_dir) / ".git")) {
+    if (!is_remote && !is_git_repo(repo_dir)) {
         std::cerr << "[-] Error: '" << repo_dir << "' is not a valid Git repository.\n";
         return 1;
     }
 
     if (is_remote) {
-        temp_dir = (fs::temp_directory_path() / ("bjhub_migrator_cpp_" + std::to_string(std::rand()))).string();
+        auto now_ms = std::chrono::steady_clock::now().time_since_epoch().count();
+        temp_dir = (fs::temp_directory_path() / ("bjhub_migrator_cpp_" + std::to_string(now_ms))).string();
         std::cout << "[+] Cloning remote repository from '" << repo_input << "'...\n";
-        std::string clone_cmd = "git clone \"" + repo_input + "\" \"" + temp_dir + "\"";
-        int res = std::system(clone_cmd.c_str());
-        if (res != 0) {
+        GitCmdResult clone_res = run_git_exec(fs::temp_directory_path().string(), {"clone", repo_input, temp_dir});
+        if (clone_res.exit_code != 0) {
             std::cerr << "[-] Failed to clone remote repository.\n";
             return 1;
         }
@@ -597,39 +710,47 @@ int main(int argc, char* argv[]) {
     }
 
     if (mode.empty()) {
-        std::cout << "============================================================\n";
-        std::cout << " BaekjoonHub Migration Tool (C++ High-Performance Version) \n";
-        std::cout << "============================================================\n";
-        std::cout << "Select target migration layout:\n";
-        std::cout << "  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)\n";
-        std::cout << "  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)\n";
-        std::cout << "============================================================\n";
-        std::cout << "Enter choice (1-2): ";
-        std::string choice;
-        std::getline(std::cin, choice);
-        choice = trim(choice);
-        if (choice == "2") mode = "language_first";
-        else mode = "platform_first";
+        if (yes_flag) {
+            mode = "platform_first";
+        } else {
+            std::cout << "============================================================\n";
+            std::cout << " BaekjoonHub Migration Tool (C++ High-Performance Version) \n";
+            std::cout << "============================================================\n";
+            std::cout << "Select target migration layout:\n";
+            std::cout << "  1. Platform-first (e.g. 백준/Bronze/..., 프로그래머스/lv1/...)\n";
+            std::cout << "  2. Language-first (e.g. Python3/백준/..., Java/프로그래머스/...)\n";
+            std::cout << "============================================================\n";
+            std::cout << "Enter choice (1-2): ";
+            std::string choice;
+            std::getline(std::cin, choice);
+            choice = trim(choice);
+            if (choice == "2") mode = "language_first";
+            else mode = "platform_first";
+        }
     }
 
     if (dry_run) {
         preview_migration(repo_dir, mode);
     } else {
         preview_migration(repo_dir, mode);
-        std::cout << "Do you want to proceed with rewriting Git history? (y/N): ";
-        std::string confirm;
-        std::getline(std::cin, confirm);
+        std::string confirm = "y";
+        if (!yes_flag) {
+            std::cout << "Do you want to proceed with rewriting Git history? (y/N): ";
+            std::getline(std::cin, confirm);
+        }
         if (trim(to_lower(confirm)) == "y") {
             execute_rewrite(repo_dir, mode);
 
             if (is_remote) {
-                std::cout << "\n============================================================\n";
-                std::cout << " REMOTE PUSH CONFIRMATION\n";
-                std::cout << "============================================================\n";
-                std::cout << "WARNING: Force pushing will overwrite the remote repository history.\n";
-                std::cout << "Do you want to force push the changes to remote? (y/N): ";
-                std::string push_confirm;
-                std::getline(std::cin, push_confirm);
+                std::string push_confirm = "n";
+                if (!yes_flag) {
+                    std::cout << "\n============================================================\n";
+                    std::cout << " REMOTE PUSH CONFIRMATION\n";
+                    std::cout << "============================================================\n";
+                    std::cout << "WARNING: Force pushing will overwrite the remote repository history.\n";
+                    std::cout << "Do you want to force push the changes to remote? (y/N): ";
+                    std::getline(std::cin, push_confirm);
+                }
                 if (trim(to_lower(push_confirm)) == "y") {
                     std::string current_branch = trim(run_git_command(repo_dir, {"rev-parse", "--abbrev-ref", "HEAD"}));
                     std::cout << "[+] Force pushing rewritten branch '" << current_branch << "' to origin...\n";

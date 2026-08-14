@@ -74,5 +74,8 @@ Since Git history is rewritten, a force push is required to update the remote re
 git push origin main --force
 ```
 
+> [!WARNING]
+> GPG signatures on existing commits will be lost during history rewriting since new commit tree SHAs are generated.
+
 > [!CAUTION]
-> Force push overwrites remote repository history. Verify results locally before pushing.
+> Force push overwrites remote repository history. Verify results locally before pushing. Original history is preserved in `backup-before-migration` (or timestamped backup branches on repeated runs).

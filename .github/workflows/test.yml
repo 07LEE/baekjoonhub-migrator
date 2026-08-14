@@ -1,0 +1,22 @@
+name: C++ E2E Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run E2E Test Suite
+        run: |
+          chmod +x tests/test_e2e.sh
+          ./tests/test_e2e.sh

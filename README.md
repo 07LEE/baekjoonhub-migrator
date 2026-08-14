@@ -20,15 +20,15 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
    - Standardizes legacy `Python3/` directory names to `Python`.
    - Standardizes level directory names (e.g. `lv1` -> `1`, `2`, `3`) to align with BaekjoonHub specifications.
 
-4. Execution Environments (Python & C++)
-   - Provides both a Python script (`migrator.py`) and a standalone C++ binary (`baekjoonhub-migrator`).
-   - Includes Dry-Run mode and automatic backup branch (`backup-before-migration`) creation.
+4. High Performance & Zero Dependencies
+   - Powered by a standalone C++ engine with zero external runtime dependencies.
+   - Includes Dry-Run preview mode and automatic backup branch (`backup-before-migration`) creation.
 
 ## Usage
 
-### 1. C++ Binary Execution (Pre-built Releases)
+### 1. Pre-built Binary Execution
 
-Download the pre-built binary for your platform from GitHub Releases.
+Download the pre-built binary for your OS platform from GitHub Releases.
 
 Linux:
 ```bash
@@ -47,28 +47,23 @@ Windows:
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
 
-Build from Source (CMake):
+### 2. Build from Source (CMake)
+
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ./build/baekjoonhub-migrator --repo /path/to/your/repository
 ```
 
-### 2. Python Script Execution (`migrator.py`)
+### 3. Run E2E Test Suite
 
-Run directly with Python 3 environment.
-
-Preview Changes (Dry-Run Mode):
 ```bash
-python3 src/migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
+chmod +x tests/test_e2e.sh
+./tests/test_e2e.sh
 ```
 
-Run Migration:
-```bash
-python3 src/migrator.py --repo /path/to/your/repository
-```
+### 4. Reflecting to Remote Repository
 
-### 3. Reflecting to Remote Repository
 
 Since Git history is rewritten, a force push is required to update the remote repository:
 

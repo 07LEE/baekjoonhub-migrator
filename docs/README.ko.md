@@ -20,15 +20,15 @@
    - 과거 BaekjoonHub의 `Python3/` 디렉터리명을 표준 `Python/`으로 자동 변환합니다.
    - 백준허브 동작 규격에 맞추어 `lv1` 형태의 폴더명을 숫자(`1`, `2`, `3`) 형태로 정규화합니다.
 
-4. 실행 환경 (Python / C++)
-   - Python 스크립트(`migrator.py`) 및 C++ 바이너리(`baekjoonhub-migrator`) 제공
-   - 안전장치: Dry-Run 모드 및 실행 전 백업 브랜치(`backup-before-migration`) 자동 생성
+4. 고성능 단일 C++ 엔진
+   - 외부 런타임 의존성 없는 단일 C++ 스탠드얼론 바이너리로 동작합니다.
+   - 안전장치: Dry-Run 미리보기 모드 및 실행 전 백업 브랜치(`backup-before-migration`) 자동 생성
 
 ## 사용법
 
-### 1. C++ 바이너리 실행 (Releases 제공)
+### 1. OS별 사전 빌드 바이너리 실행
 
-GitHub Release 페이지에서 OS별 실행 바이너리를 다운로드하여 실행합니다.
+GitHub Release 페이지에서 OS별 사전 빌드 바이너리를 다운로드하여 실행합니다.
 
 Linux:
 ```bash
@@ -47,28 +47,23 @@ Windows:
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
 
-C++ 소스 직접 빌드 (CMake):
+### 2. C++ 소스 직접 빌드 (CMake)
+
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ./build/baekjoonhub-migrator --repo /path/to/your/repository
 ```
 
-### 2. Python 스크립트 실행 (`migrator.py`)
+### 3. E2E 통합 테스트 실행
 
-Python 3 환경에서 스크립트를 직접 실행합니다.
-
-#### 미리보기 (Dry-Run 모드)
 ```bash
-python3 src/migrator.py --repo /path/to/your/repository --mode platform_first --dry-run
+chmod +x tests/test_e2e.sh
+./tests/test_e2e.sh
 ```
 
-#### 마이그레이션 실행
-```bash
-python3 src/migrator.py --repo /path/to/your/repository
-```
+### 4. 원격 리포지토리 반영
 
-### 3. 원격 리포지토리 반영
 
 Git 히스토리가 재작성되었으므로 원격 리포지토리에 반영하려면 강제 푸시(`force push`)가 필요합니다.
 

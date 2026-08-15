@@ -26,7 +26,7 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
 
 ## Usage
 
-### 1. Pre-built Binary Execution
+### 1. Download Pre-built Binary
 
 Download the pre-built binary for your OS platform from GitHub Releases.
 
@@ -47,23 +47,7 @@ Windows:
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
 
-### 2. Build from Source (CMake)
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-./build/baekjoonhub-migrator --repo /path/to/your/repository
-```
-
-### 3. Run E2E Test Suite
-
-```bash
-chmod +x tests/test_e2e.sh
-./tests/test_e2e.sh
-```
-
-### 4. Reflecting to Remote Repository
-
+### 2. Reflecting to Remote Repository
 
 Since Git history is rewritten, a force push is required to update the remote repository:
 
@@ -76,3 +60,4 @@ git push origin main --force
 
 > [!CAUTION]
 > Force push overwrites remote repository history. Verify results locally before pushing. Original history is preserved in `backup-before-migration` (or timestamped backup branches on repeated runs).
+

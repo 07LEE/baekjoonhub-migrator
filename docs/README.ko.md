@@ -26,9 +26,9 @@
 
 ## 사용법
 
-### 1. OS별 사전 빌드 바이너리 실행
+### 1. OS별 사전 빌드 바이너리 다운로드 및 실행
 
-GitHub Release 페이지에서 OS별 사전 빌드 바이너리를 다운로드하여 실행합니다.
+GitHub Release 페이지에서 본인의 OS 환경에 맞는 바이너리를 다운로드하여 실행합니다.
 
 Linux:
 ```bash
@@ -47,23 +47,7 @@ Windows:
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
 
-### 2. C++ 소스 직접 빌드 (CMake)
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-./build/baekjoonhub-migrator --repo /path/to/your/repository
-```
-
-### 3. E2E 통합 테스트 실행
-
-```bash
-chmod +x tests/test_e2e.sh
-./tests/test_e2e.sh
-```
-
-### 4. 원격 리포지토리 반영
-
+### 2. 원격 리포지토리 반영
 
 Git 히스토리가 재작성되었으므로 원격 리포지토리에 반영하려면 강제 푸시(`force push`)가 필요합니다.
 
@@ -76,3 +60,4 @@ git push origin main --force
 
 > [!CAUTION]
 > 강제 푸시는 원격 히스토리를 덮어씁니다. 실행 전 로컬에서 결과를 충분히 확인하세요. 원본 히스토리는 `backup-before-migration`(재실행 시 타임스탬프 브랜치)에 안전하게 백업됩니다.
+

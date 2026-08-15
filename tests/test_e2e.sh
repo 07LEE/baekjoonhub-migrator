@@ -77,8 +77,15 @@ PRE_COMMIT_COUNT=$(git -C "${FIXTURE_REPO}" rev-list --count HEAD)
 PRE_LOG_RAW=$(git -C "${FIXTURE_REPO}" log --date=raw --pretty=format:"%an <%ae> %ad | %cn <%ce> %cd | %s")
 PRE_BLOBS=$(git -C "${FIXTURE_REPO}" ls-tree -r HEAD | awk '{print $3}' | sort -u)
 
-echo "[+] Running C++ migration engine in language_first mode with 120s timeout..."
-timeout 120 "${MIGRATOR_BIN}" --repo "${FIXTURE_REPO}" --mode language_first -y
+echo "[+] Running C++ migration engine in language_first mode..."
+if command -v timeout >/dev/null 2>&1; then
+    timeout 120 "${MIGRATOR_BIN}" --repo "${FIXTURE_REPO}" --mode language_first -y
+elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 120 "${MIGRATOR_BIN}" --repo "${FIXTURE_REPO}" --mode language_first -y
+else
+    "${MIGRATOR_BIN}" --repo "${FIXTURE_REPO}" --mode language_first -y
+fi
+
 
 echo "[+] Verifying migration output integrity..."
 

@@ -61,6 +61,23 @@ git -C "${FIXTURE_REPO}" add "${LARGE_FILE}"
 GIT_COMMITTER_DATE="1666202000 +0900" GIT_AUTHOR_DATE="1666202000 +0900" \
 git -C "${FIXTURE_REPO}" commit -m "feat: add large data file" -q
 
+# Commit 4b: PyPy3 / "Python 3" (space) folders should also normalize to Python (BaekjoonHub #346)
+PYPY_DIR="${FIXTURE_REPO}/PyPy3/백준/Gold/9663. N-Queen"
+mkdir -p "${PYPY_DIR}"
+echo "print('n-queen')" > "${PYPY_DIR}/N-Queen.py"
+echo "# N-Queen" > "${PYPY_DIR}/README.md"
+git -C "${FIXTURE_REPO}" add "${PYPY_DIR}"
+GIT_COMMITTER_DATE="1666201950 +0900" GIT_AUTHOR_DATE="1666201950 +0900" \
+git -C "${FIXTURE_REPO}" commit -m "feat: add PyPy3 solution for 9663" -q
+
+SPACED_DIR="${FIXTURE_REPO}/Python 3/백준/Bronze/10809. 알파벳 찾기"
+mkdir -p "${SPACED_DIR}"
+echo "print('alphabet')" > "${SPACED_DIR}/알파벳 찾기.py"
+echo "# Alphabet" > "${SPACED_DIR}/README.md"
+git -C "${FIXTURE_REPO}" add "${SPACED_DIR}"
+GIT_COMMITTER_DATE="1666201960 +0900" GIT_AUTHOR_DATE="1666201960 +0900" \
+git -C "${FIXTURE_REPO}" commit -m "feat: add Python 3 solution for 10809" -q
+
 # Commit 5: Create a feature branch & merge commit
 git -C "${FIXTURE_REPO}" checkout -q -b feature-branch
 echo "feature work" > "${FIXTURE_REPO}/feature.txt"
@@ -125,8 +142,12 @@ C++/백준/Bronze/2753. 윤년/README.md
 C++/백준/Bronze/2753. 윤년/윤년.cpp
 Oracle/프로그래머스/1/131112. 강원도에 위치한 생산공장 목록 출력하기/README.md
 Oracle/프로그래머스/1/131112. 강원도에 위치한 생산공장 목록 출력하기/강원도에 위치한 생산공장 목록 출력하기.sql
+Python/백준/Bronze/10809. 알파벳 찾기/README.md
+Python/백준/Bronze/10809. 알파벳 찾기/알파벳 찾기.py
 Python/백준/Bronze/2753. 윤년/README.md
 Python/백준/Bronze/2753. 윤년/윤년.py
+Python/백준/Gold/9663. N-Queen/N-Queen.py
+Python/백준/Gold/9663. N-Queen/README.md
 Python/백준/Silver/1000. A＋B/large_data.txt
 README.md
 feature.txt

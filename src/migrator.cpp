@@ -63,6 +63,33 @@ std::string rstrip_newline(const std::string& s) {
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
 }
 
+// Matches BaekjoonHub's own normalizeLanguageName() (scripts/utils/pathNormalize.js, #346):
+// /^(python|pypy)[  ]?[0-9.]*$/i -- e.g. "Python3", "PyPy3", "Python 3", "PYTHON" all collapse to "Python".
+bool is_python_family_name(const std::string& name) {
+    std::string lower = to_lower(name);
+    std::string prefix;
+    if (lower.rfind("python", 0) == 0) prefix = "python";
+    else if (lower.rfind("pypy", 0) == 0) prefix = "pypy";
+    else return false;
+
+    std::string rest = name.substr(prefix.size());
+    size_t i = 0;
+    if (!rest.empty()) {
+        if (rest[0] == ' ') {
+            i = 1;
+        } else if (rest.size() >= 3 &&
+                   static_cast<unsigned char>(rest[0]) == 0xE2 &&
+                   static_cast<unsigned char>(rest[1]) == 0x80 &&
+                   static_cast<unsigned char>(rest[2]) == 0x85) {
+            i = 3; // U+2005 FOUR-PER-EM SPACE, UTF-8 encoded
+        }
+    }
+    for (; i < rest.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(rest[i])) && rest[i] != '.') return false;
+    }
+    return true;
+}
+
 
 struct GitCmdResult {
     int exit_code;
@@ -240,7 +267,7 @@ public:
         if (parts.empty()) return path;
 
         std::string top_dir = parts[0];
-        if (top_dir == "Python3") top_dir = "Python";
+        if (is_python_family_name(top_dir)) top_dir = "Python";
 
         std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
 
@@ -693,7 +720,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             fs::path fp(filename);
             if (!fp.has_extension()) continue;
             std::string top_dir = parts[0];
-            if (top_dir == "Python3") top_dir = "Python";
+            if (is_python_family_name(top_dir)) top_dir = "Python";
             std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
             std::string problem_key = "";
             if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
@@ -768,7 +795,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     fs::path fp(parts.back());
                     if (fp.has_extension()) {
                         std::string top_dir = parts[0];
-                        if (top_dir == "Python3") top_dir = "Python";
+                        if (is_python_family_name(top_dir)) top_dir = "Python";
                         std::vector<std::string> sub_parts(parts.begin() + 1, parts.end());
                         std::string problem_key = "";
                         if (PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() && PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end()) {
@@ -824,7 +851,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
                 bool is_readme = (!parts.empty() && to_lower(parts.back()) == "readme.md");
                 std::string top_dir = !parts.empty() ? parts[0] : "";
-                if (top_dir == "Python3") top_dir = "Python";
+                if (is_python_family_name(top_dir)) top_dir = "Python";
                 std::vector<std::string> sub_parts = parts.size() > 1 ? std::vector<std::string>(parts.begin() + 1, parts.end()) : std::vector<std::string>();
                 std::string problem_key = "";
                 if (parts.size() > 1) {

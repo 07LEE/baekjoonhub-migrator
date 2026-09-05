@@ -17,7 +17,7 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
    - Flat: `백준/...` (Platform-focused flat layout)
 
 3. Automatic Directory Normalization
-   - Standardizes legacy `Python3/` directory names to `Python`.
+   - Standardizes legacy Python-family directory names (`Python3/`, `PyPy3/`, `Python 3/`, etc.) to `Python`, matching BaekjoonHub's own folder standardization.
    - Standardizes level directory names (e.g. `lv1` -> `1`, `2`, `3`) to align with BaekjoonHub specifications.
 
 4. High Performance & Zero Dependencies
@@ -31,18 +31,21 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
 Download the pre-built binary for your OS platform from GitHub Releases.
 
 Linux:
+
 ```bash
 chmod +x baekjoonhub-migrator-linux
 ./baekjoonhub-migrator-linux --repo /path/to/your/repository
 ```
 
 macOS:
+
 ```bash
 chmod +x baekjoonhub-migrator-macos
 ./baekjoonhub-migrator-macos --repo /path/to/your/repository
 ```
 
 Windows:
+
 ```cmd
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
@@ -58,6 +61,7 @@ git push origin main --force
 > [!WARNING]
 > GPG signatures on existing commits will be lost during history rewriting since new commit tree SHAs are generated.
 
+<!-- -->
+
 > [!CAUTION]
 > Force push overwrites remote repository history. Verify results locally before pushing. Original history is preserved in `backup-before-migration` (or timestamped backup branches on repeated runs).
-

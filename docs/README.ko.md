@@ -17,7 +17,7 @@
    - Flat: `백준/...` (플랫폼 중심 Flat 레이아웃)
 
 3. 디렉토리 명칭 자동 정규화
-   - 과거 BaekjoonHub의 `Python3/` 디렉터리명을 표준 `Python/`으로 자동 변환합니다.
+   - 과거 BaekjoonHub의 파이썬 계열 디렉터리명(`Python3/`, `PyPy3/`, `Python 3/` 등)을 표준 `Python/`으로 자동 변환합니다. (BaekjoonHub 자체의 폴더 표준화 방식과 동일)
    - 백준허브 동작 규격에 맞추어 `lv1` 형태의 폴더명을 숫자(`1`, `2`, `3`) 형태로 정규화합니다.
 
 4. 고성능 단일 C++ 엔진
@@ -31,18 +31,21 @@
 GitHub Release 페이지에서 본인의 OS 환경에 맞는 바이너리를 다운로드하여 실행합니다.
 
 Linux:
+
 ```bash
 chmod +x baekjoonhub-migrator-linux
 ./baekjoonhub-migrator-linux --repo /path/to/your/repository
 ```
 
 macOS:
+
 ```bash
 chmod +x baekjoonhub-migrator-macos
 ./baekjoonhub-migrator-macos --repo /path/to/your/repository
 ```
 
 Windows:
+
 ```cmd
 baekjoonhub-migrator-windows.exe --repo C:\path\to\your\repository
 ```
@@ -58,6 +61,7 @@ git push origin main --force
 > [!WARNING]
 > 커밋 트리 SHA가 새로 생성되므로 기존 커밋의 GPG 서명은 재작성 과정에서 소실됩니다.
 
+<!-- -->
+
 > [!CAUTION]
 > 강제 푸시는 원격 히스토리를 덮어씁니다. 실행 전 로컬에서 결과를 충분히 확인하세요. 원본 히스토리는 `backup-before-migration`(재실행 시 타임스탬프 브랜치)에 안전하게 백업됩니다.
-

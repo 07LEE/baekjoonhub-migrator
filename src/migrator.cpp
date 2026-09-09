@@ -740,6 +740,9 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     std::unordered_map<std::string, std::string> sql_blob_cache;
     std::unordered_map<std::string, std::string> path_dialect_cache;
+    // Keep every emitted README destination, including those on merged branches.
+    // A later deletion must remove all copies, even if language inference changed.
+    std::unordered_map<std::string, std::set<std::string>> readme_destinations;
     std::unordered_map<std::string, std::string> folder_lang_map;
     std::unordered_map<std::string, std::set<std::string>> folder_lang_set_map;
 
@@ -937,6 +940,7 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
                         std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, single_map);
+                        readme_destinations[line_item.orig_path].insert(new_path);
                         std::string escaped_new = escape_path(new_path);
                         std::string new_line = "M " + line_item.fmode + " " + line_item.dataref + " " + escaped_new + "\n";
                         fputs(new_line.c_str(), imp_pipe);
@@ -944,6 +948,7 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 } else {
 
                     std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map);
+                    if (is_readme) readme_destinations[line_item.orig_path].insert(new_path);
                     if (PathMapper::SQL_CACHE.count(line_item.dataref)) {
                         path_dialect_cache[line_item.orig_path] = PathMapper::SQL_CACHE[line_item.dataref];
                     }
@@ -952,6 +957,14 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     fputs(new_line.c_str(), imp_pipe);
                 }
             } else if (line_item.action == "D") {
+                auto readme = readme_destinations.find(line_item.orig_path);
+                if (readme != readme_destinations.end()) {
+                    for (const auto& destination : readme->second) {
+                        std::string deletion = "D " + escape_path(destination) + "\n";
+                        fputs(deletion.c_str(), imp_pipe);
+                    }
+                    continue;
+                }
                 auto it = path_dialect_cache.find(line_item.orig_path);
                 if (it != path_dialect_cache.end()) {
                     PathMapper::SQL_CACHE["__path__" + line_item.orig_path] = it->second;

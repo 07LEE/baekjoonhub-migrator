@@ -110,6 +110,39 @@ class RegressionTests(unittest.TestCase):
                 else:
                     self.assertEqual(remote_head, original)
 
+    def test_readme_deletion_removes_all_copies_through_merge_and_readd(self):
+        problem = '백준/Bronze/1/'
+        self.put(problem + 'a.py', 'python')
+        self.put(problem + 'a.cpp', 'cpp')
+        self.put(problem + 'README.md', 'first')
+        self.commit()
+        self.git('checkout', '-qb', 'delete-doc')
+        (self.repo / (problem + 'README.md')).unlink()
+        self.commit()
+        self.git('checkout', '-q', 'main')
+        self.put('unrelated.txt', 'main branch')
+        self.commit()
+        self.git('merge', '-q', '--no-ff', 'delete-doc', '-m', 'merge deletion')
+        self.put(problem + 'README.md', 'second')
+        self.commit()
+        (self.repo / (problem + 'README.md')).unlink()
+        self.commit()
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        old = self.git('rev-list', '--topo-order', 'backup-before-migration').splitlines()
+        new = self.git('rev-list', '--topo-order', 'HEAD').splitlines()
+        self.assertEqual(len(old), len(new))
+        for original, rewritten in zip(old, new):
+            before = self.git('ls-tree', '-r', '-z', '--name-only', original.decode()).split(b'\0')
+            after = self.git('ls-tree', '-r', '-z', '--name-only', rewritten.decode()).split(b'\0')
+            existed = (problem + 'README.md').encode() in before
+            for language in ('Python', 'C++'):
+                path = language + '/' + problem + 'README.md'
+                self.assertEqual(path.encode() in after, existed)
+                if existed:
+                    self.assertEqual(self.git('show', rewritten.decode() + ':' + path),
+                                     self.git('show', original.decode() + ':' + problem + 'README.md'))
+
 
 if __name__ == '__main__':
     unittest.main()

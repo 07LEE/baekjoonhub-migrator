@@ -1,6 +1,6 @@
 # 백준허브 오토푸시 마이그레이션 도구 (BaekjoonHub Migration Tool)
 
-[언어: [English](../README.md) | [한국어](README.ko.md)]
+[English](../README.md) | 한국어
 
 [BaekjoonHub](https://github.com/BaekjoonHub/BaekjoonHub)로 자동 푸시된 리포지토리의 파편화된 디렉토리 구조(`Python3/프로그래머스`, `백준/...` 등)를 표준 통일 기준으로 재정렬하는 도구입니다.
 

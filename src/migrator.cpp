@@ -1138,6 +1138,7 @@ int main(int argc, char* argv[]) {
     bool is_remote = is_remote_url(repo_input);
     std::string repo_dir = repo_input;
     std::string temp_dir = "";
+    bool retain_temp_dir = false;
 
     if (!is_remote) {
         repo_dir = fs::absolute(repo_input).string();
@@ -1210,6 +1211,10 @@ int main(int argc, char* argv[]) {
             std::getline(std::cin, confirm);
         }
         if (trim(to_lower(confirm)) == "y") {
+            if (is_remote) {
+                retain_temp_dir = true;
+                std::cout << "[+] Repository retained at: " << repo_dir << "\n";
+            }
             if (!execute_rewrite(repo_dir, mode)) return 1;
 
             if (is_remote) {
@@ -1225,7 +1230,12 @@ int main(int argc, char* argv[]) {
                 if (trim(to_lower(push_confirm)) == "y") {
                     std::string current_branch = trim(run_git_command(repo_dir, {"rev-parse", "--abbrev-ref", "HEAD"}));
                     std::cout << "[+] Force pushing rewritten branch '" << current_branch << "' to origin...\n";
-                    run_git_command(repo_dir, {"push", "-f", "origin", current_branch});
+                    auto push_result = run_git_exec(repo_dir, {"push", "-f", "origin", current_branch});
+                    if (push_result.exit_code != 0) {
+                        std::cerr << "[-] Push failed. Migrated repository and backup retained at: "
+                                  << repo_dir << "\n";
+                        return 1;
+                    }
                     std::cout << "[+] Push completed successfully!\n";
                 } else {
                     std::cout << "[-] Force push cancelled. Migrated repository remains in temporary directory:\n";
@@ -1237,7 +1247,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (!temp_dir.empty()) {
+    if (!temp_dir.empty() && !retain_temp_dir) {
         std::cout << "[+] Cleaning up temporary directory...\n";
         fs::remove_all(temp_dir);
     }

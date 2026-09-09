@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess
 import sys
@@ -68,6 +69,46 @@ class RegressionTests(unittest.TestCase):
                     self.assertEqual(self.git('rev-parse', 'HEAD'), head)
                     self.assertEqual(self.git('status', '--porcelain'), b'')
                     self.assertEqual(self.git('branch', '--list', 'backup-before-migration'), b'')
+
+    def test_remote_results_and_backups_are_retained(self):
+        self.put('Python/백준/Bronze/1/a.py', 'solution')
+        self.commit()
+        original = self.git('rev-parse', 'HEAD')
+        root = pathlib.Path(self.temp.name)
+        remote = root / 'origin.git'
+        subprocess.check_call(['git', 'clone', '--bare', str(self.repo), str(remote)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        config = root / 'gitconfig'
+        config.write_text('[url "' + remote.as_uri() + '"]\n'
+                          '    insteadOf = https://migrator.test/repo\n')
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM='1',
+                   TMPDIR=str(root), TMP=str(root), TEMP=str(root))
+        for action in ('cancel', 'yes_flag', 'failed_push', 'successful_push'):
+            with self.subTest(action=action):
+                subprocess.check_call(['git', '-C', str(remote), 'config',
+                                       'receive.denyNonFastForwards',
+                                       'true' if action == 'failed_push' else 'false'])
+                args = [BINARY, '--repo', 'https://migrator.test/repo',
+                        '--mode', 'platform_first']
+                if action == 'yes_flag':
+                    args.append('-y')
+                result = subprocess.run(args, input='y\nn\n' if action == 'cancel' else 'y\ny\n',
+                                        text=True, capture_output=True, env=env, timeout=30)
+                self.assertEqual(result.returncode, 1 if action == 'failed_push' else 0,
+                                 result.stdout + result.stderr)
+                retained = result.stdout.split('[+] Repository retained at: ', 1)[1].splitlines()[0]
+                target = pathlib.Path(retained)
+                self.assertTrue((target / '백준/Bronze/1/a.py').is_file())
+                backup = subprocess.check_output(['git', '-C', retained, 'rev-parse',
+                                                  'backup-before-migration'])
+                self.assertEqual(backup, original)
+                if action == 'failed_push':
+                    self.assertNotIn('Push completed successfully', result.stdout)
+                remote_head = subprocess.check_output(['git', '-C', str(remote), 'rev-parse', 'main'])
+                if action == 'successful_push':
+                    self.assertNotEqual(remote_head, original)
+                else:
+                    self.assertEqual(remote_head, original)
 
 
 if __name__ == '__main__':

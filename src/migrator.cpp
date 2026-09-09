@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <set>
+#include <map>
 #include <memory>
 
 #include <cstdlib>
@@ -619,11 +620,74 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::cout << "============================================================\n\n";
 }
 
-void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
+// Validate complete trees before starting fast-import, which can update branch refs.
+bool validate_destination_paths(const std::string& repo_dir, const std::string& branch,
+                                const std::string& mode) {
+    auto history = run_git_exec(repo_dir, {"log", "--format=%T", branch});
+    if (history.exit_code != 0) return false;
+    std::istringstream trees(history.stdout_str);
+    std::unordered_set<std::string> checked;
+    std::string tree;
+    auto get_content = [&](const std::string& sha) {
+        return run_git_command(repo_dir, {"cat-file", "-p", sha});
+    };
+    while (std::getline(trees, tree)) {
+        if (!checked.insert(tree).second) continue;
+        auto result = run_git_exec(repo_dir, {"ls-tree", "-r", "-z", tree});
+        if (result.exit_code != 0) return false;
+        std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries;
+        std::istringstream records(result.stdout_str);
+        std::string record;
+        while (std::getline(records, record, '\0')) {
+            auto tab = record.find('\t');
+            if (tab == std::string::npos) return false;
+            std::istringstream meta(record.substr(0, tab));
+            std::string file_mode, type, sha;
+            meta >> file_mode >> type >> sha;
+            entries.emplace_back(file_mode, type, sha, record.substr(tab + 1));
+        }
+        auto languages = build_folder_lang_map(entries, get_content);
+        std::map<std::string, std::string> destinations;
+        for (const auto& entry : entries) {
+            const auto& source = std::get<3>(entry);
+            auto destination = PathMapper::transform_path(source, mode, get_content,
+                                                         std::get<2>(entry), languages);
+            auto [it, inserted] = destinations.emplace(destination, source);
+            if (!inserted) {
+                std::cerr << "[-] Destination collision in tree " << tree << ": "
+                          << it->second << " and " << source << " -> " << destination << "\n";
+                return false;
+            }
+        }
+        // A transformed file must not replace another file's parent directory.
+        for (const auto& [destination, source] : destinations) {
+            auto slash = destination.find('/');
+            while (slash != std::string::npos) {
+                auto parent = destinations.find(destination.substr(0, slash));
+                if (parent != destinations.end()) {
+                    std::cerr << "[-] File/directory destination collision: "
+                              << parent->second << " and " << source << "\n";
+                    return false;
+                }
+                slash = destination.find('/', slash + 1);
+            }
+        }
+    }
+    return true;
+}
+
+bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
+    auto status = run_git_exec(repo_dir, {"status", "--porcelain", "--untracked-files=all"});
+    if (status.exit_code != 0 || !status.stdout_str.empty()) {
+        std::cerr << "[-] Refusing to rewrite: working tree must be clean (including untracked files).\n";
+        return false;
+    }
     std::string current_branch = trim(run_git_command(repo_dir, {"rev-parse", "--abbrev-ref", "HEAD"}));
     if (current_branch == "HEAD" || current_branch.empty()) {
         current_branch = "main";
     }
+
+    if (!validate_destination_paths(repo_dir, current_branch, mode)) return false;
 
     std::cout << "[+] Starting Git history rewrite for branch '" << current_branch << "'...\n";
     std::string backup_branch = create_backup_branch(repo_dir);
@@ -635,14 +699,14 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     FILE* imp_pipe = _popen(import_cmd.c_str(), "wb");
     if (!exp_pipe || !imp_pipe) {
         std::cerr << "[-] Error creating process pipe for fast-export/import.\n";
-        return;
+        return false;
     }
 #else
     int pipe_exp[2];
     int pipe_imp[2];
     if (pipe(pipe_exp) < 0 || pipe(pipe_imp) < 0) {
         std::cerr << "[-] Error creating POSIX pipes.\n";
-        return;
+        return false;
     }
 
     pid_t pid_exp = fork();
@@ -676,6 +740,9 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     std::unordered_map<std::string, std::string> sql_blob_cache;
     std::unordered_map<std::string, std::string> path_dialect_cache;
+    // Keep every emitted README destination, including those on merged branches.
+    // A later deletion must remove all copies, even if language inference changed.
+    std::unordered_map<std::string, std::set<std::string>> readme_destinations;
     std::unordered_map<std::string, std::string> folder_lang_map;
     std::unordered_map<std::string, std::set<std::string>> folder_lang_set_map;
 
@@ -873,6 +940,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
                         std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, single_map);
+                        readme_destinations[line_item.orig_path].insert(new_path);
                         std::string escaped_new = escape_path(new_path);
                         std::string new_line = "M " + line_item.fmode + " " + line_item.dataref + " " + escaped_new + "\n";
                         fputs(new_line.c_str(), imp_pipe);
@@ -880,6 +948,7 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 } else {
 
                     std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map);
+                    if (is_readme) readme_destinations[line_item.orig_path].insert(new_path);
                     if (PathMapper::SQL_CACHE.count(line_item.dataref)) {
                         path_dialect_cache[line_item.orig_path] = PathMapper::SQL_CACHE[line_item.dataref];
                     }
@@ -888,6 +957,14 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     fputs(new_line.c_str(), imp_pipe);
                 }
             } else if (line_item.action == "D") {
+                auto readme = readme_destinations.find(line_item.orig_path);
+                if (readme != readme_destinations.end()) {
+                    for (const auto& destination : readme->second) {
+                        std::string deletion = "D " + escape_path(destination) + "\n";
+                        fputs(deletion.c_str(), imp_pipe);
+                    }
+                    continue;
+                }
                 auto it = path_dialect_cache.find(line_item.orig_path);
                 if (it != path_dialect_cache.end()) {
                     PathMapper::SQL_CACHE["__path__" + line_item.orig_path] = it->second;
@@ -1043,12 +1120,13 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     if (!ok_exp || !ok_imp) {
         std::cerr << "[-] Error: Git fast-export or fast-import process failed.\n";
-        return;
+        return false;
     }
 
-    run_git_command(repo_dir, {"checkout", "-f", current_branch});
+    if (run_git_exec(repo_dir, {"checkout", "-f", current_branch}).exit_code != 0) return false;
     std::cout << "\n[+] Migration successfully finished! Branch '" << current_branch << "' now points to rewritten history.\n";
     std::cout << "[+] Original history backed up in '" << backup_branch << "'.\n";
+    return true;
 }
 
 int main(int argc, char* argv[]) {
@@ -1073,6 +1151,7 @@ int main(int argc, char* argv[]) {
     bool is_remote = is_remote_url(repo_input);
     std::string repo_dir = repo_input;
     std::string temp_dir = "";
+    bool retain_temp_dir = false;
 
     if (!is_remote) {
         repo_dir = fs::absolute(repo_input).string();
@@ -1145,7 +1224,11 @@ int main(int argc, char* argv[]) {
             std::getline(std::cin, confirm);
         }
         if (trim(to_lower(confirm)) == "y") {
-            execute_rewrite(repo_dir, mode);
+            if (is_remote) {
+                retain_temp_dir = true;
+                std::cout << "[+] Repository retained at: " << repo_dir << "\n";
+            }
+            if (!execute_rewrite(repo_dir, mode)) return 1;
 
             if (is_remote) {
                 std::string push_confirm = "n";
@@ -1160,7 +1243,12 @@ int main(int argc, char* argv[]) {
                 if (trim(to_lower(push_confirm)) == "y") {
                     std::string current_branch = trim(run_git_command(repo_dir, {"rev-parse", "--abbrev-ref", "HEAD"}));
                     std::cout << "[+] Force pushing rewritten branch '" << current_branch << "' to origin...\n";
-                    run_git_command(repo_dir, {"push", "-f", "origin", current_branch});
+                    auto push_result = run_git_exec(repo_dir, {"push", "-f", "origin", current_branch});
+                    if (push_result.exit_code != 0) {
+                        std::cerr << "[-] Push failed. Migrated repository and backup retained at: "
+                                  << repo_dir << "\n";
+                        return 1;
+                    }
                     std::cout << "[+] Push completed successfully!\n";
                 } else {
                     std::cout << "[-] Force push cancelled. Migrated repository remains in temporary directory:\n";
@@ -1172,7 +1260,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (!temp_dir.empty()) {
+    if (!temp_dir.empty() && !retain_temp_dir) {
         std::cout << "[+] Cleaning up temporary directory...\n";
         fs::remove_all(temp_dir);
     }

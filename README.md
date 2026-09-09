@@ -1,6 +1,6 @@
 # BaekjoonHub Migration Tool
 
-[Language: [English](README.md) | [한국어](docs/README.ko.md)]
+English | [한국어](docs/README.ko.md)
 
 A migration tool designed to reorganize auto-pushed repository layouts from [BaekjoonHub](https://github.com/BaekjoonHub/BaekjoonHub) into a unified directory structure.
 

@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #define IS_WINDOWS 0
 #endif
 
@@ -195,6 +196,47 @@ std::string run_git_command(const std::string& repo_dir, const std::vector<std::
 bool is_git_repo(const std::string& path) {
     GitCmdResult res = run_git_exec(path, {"rev-parse", "--git-dir"});
     return res.exit_code == 0;
+}
+
+// Runs `git fast-import` reading its stdin directly from a file on disk, so a fully
+// prepared fast-import stream can be replayed without holding it in process memory.
+GitCmdResult run_fast_import_from_file(const std::string& repo_dir, const std::string& input_file) {
+    GitCmdResult res = { -1, "", "" };
+#if IS_WINDOWS
+    std::string cmd = "git -C \"" + repo_dir + "\" fast-import --force --quiet < \"" + input_file + "\"";
+    FILE* pipe = _popen(cmd.c_str(), "r");
+    if (!pipe) return res;
+    char buffer[4096];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
+        res.stdout_str.append(buffer, n);
+    }
+    res.exit_code = _pclose(pipe);
+    return res;
+#else
+    int fd_in = open(input_file.c_str(), O_RDONLY);
+    if (fd_in < 0) return res;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fd_in);
+        return res;
+    }
+    if (pid == 0) {
+        dup2(fd_in, STDIN_FILENO);
+        close(fd_in);
+        execlp("git", "git", "-C", repo_dir.c_str(), "fast-import", "--force", "--quiet", nullptr);
+        _exit(127);
+    }
+
+    close(fd_in);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        res.exit_code = WEXITSTATUS(status);
+    }
+    return res;
+#endif
 }
 
 class PathMapper {
@@ -620,62 +662,6 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::cout << "============================================================\n\n";
 }
 
-// Validate complete trees before starting fast-import, which can update branch refs.
-bool validate_destination_paths(const std::string& repo_dir, const std::string& branch,
-                                const std::string& mode) {
-    auto history = run_git_exec(repo_dir, {"log", "--format=%T", branch});
-    if (history.exit_code != 0) return false;
-    std::istringstream trees(history.stdout_str);
-    std::unordered_set<std::string> checked;
-    std::string tree;
-    auto get_content = [&](const std::string& sha) {
-        return run_git_command(repo_dir, {"cat-file", "-p", sha});
-    };
-    while (std::getline(trees, tree)) {
-        if (!checked.insert(tree).second) continue;
-        auto result = run_git_exec(repo_dir, {"ls-tree", "-r", "-z", tree});
-        if (result.exit_code != 0) return false;
-        std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries;
-        std::istringstream records(result.stdout_str);
-        std::string record;
-        while (std::getline(records, record, '\0')) {
-            auto tab = record.find('\t');
-            if (tab == std::string::npos) return false;
-            std::istringstream meta(record.substr(0, tab));
-            std::string file_mode, type, sha;
-            meta >> file_mode >> type >> sha;
-            entries.emplace_back(file_mode, type, sha, record.substr(tab + 1));
-        }
-        auto languages = build_folder_lang_map(entries, get_content);
-        std::map<std::string, std::string> destinations;
-        for (const auto& entry : entries) {
-            const auto& source = std::get<3>(entry);
-            auto destination = PathMapper::transform_path(source, mode, get_content,
-                                                         std::get<2>(entry), languages);
-            auto [it, inserted] = destinations.emplace(destination, source);
-            if (!inserted) {
-                std::cerr << "[-] Destination collision in tree " << tree << ": "
-                          << it->second << " and " << source << " -> " << destination << "\n";
-                return false;
-            }
-        }
-        // A transformed file must not replace another file's parent directory.
-        for (const auto& [destination, source] : destinations) {
-            auto slash = destination.find('/');
-            while (slash != std::string::npos) {
-                auto parent = destinations.find(destination.substr(0, slash));
-                if (parent != destinations.end()) {
-                    std::cerr << "[-] File/directory destination collision: "
-                              << parent->second << " and " << source << "\n";
-                    return false;
-                }
-                slash = destination.find('/', slash + 1);
-            }
-        }
-    }
-    return true;
-}
-
 bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     auto status = run_git_exec(repo_dir, {"status", "--porcelain", "--untracked-files=all"});
     if (status.exit_code != 0 || !status.stdout_str.empty()) {
@@ -687,25 +673,25 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         current_branch = "main";
     }
 
-    if (!validate_destination_paths(repo_dir, current_branch, mode)) return false;
+    std::cout << "[+] Preparing rewrite for branch '" << current_branch << "'...\n";
 
-    std::cout << "[+] Starting Git history rewrite for branch '" << current_branch << "'...\n";
-    std::string backup_branch = create_backup_branch(repo_dir);
+    // The rewritten fast-import stream is written to this file first, so the whole
+    // history can be validated for destination collisions before any branch ref is
+    // touched. `git fast-import` only reads it once validation succeeds below.
+    auto now_ms = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::string stream_path = (fs::temp_directory_path() / ("bjhub_migrator_stream_" + std::to_string(now_ms) + ".fi")).string();
 
 #if IS_WINDOWS
     std::string export_cmd = "git -C \"" + repo_dir + "\" fast-export \"" + current_branch + "\"";
-    std::string import_cmd = "git -C \"" + repo_dir + "\" fast-import --force --quiet";
     FILE* exp_pipe = _popen(export_cmd.c_str(), "rb");
-    FILE* imp_pipe = _popen(import_cmd.c_str(), "wb");
-    if (!exp_pipe || !imp_pipe) {
-        std::cerr << "[-] Error creating process pipe for fast-export/import.\n";
+    if (!exp_pipe) {
+        std::cerr << "[-] Error creating process pipe for fast-export.\n";
         return false;
     }
 #else
     int pipe_exp[2];
-    int pipe_imp[2];
-    if (pipe(pipe_exp) < 0 || pipe(pipe_imp) < 0) {
-        std::cerr << "[-] Error creating POSIX pipes.\n";
+    if (pipe(pipe_exp) < 0) {
+        std::cerr << "[-] Error creating POSIX pipe for fast-export.\n";
         return false;
     }
 
@@ -714,37 +700,68 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         close(pipe_exp[0]);
         dup2(pipe_exp[1], STDOUT_FILENO);
         close(pipe_exp[1]);
-        close(pipe_imp[0]);
-        close(pipe_imp[1]);
         execlp("git", "git", "-C", repo_dir.c_str(), "fast-export", current_branch.c_str(), nullptr);
         _exit(1);
     }
 
-    pid_t pid_imp = fork();
-    if (pid_imp == 0) {
-        close(pipe_imp[1]);
-        dup2(pipe_imp[0], STDIN_FILENO);
-        close(pipe_imp[0]);
-        close(pipe_exp[0]);
-        close(pipe_exp[1]);
-        execlp("git", "git", "-C", repo_dir.c_str(), "fast-import", "--force", "--quiet", nullptr);
-        _exit(1);
-    }
-
     close(pipe_exp[1]);
-    close(pipe_imp[0]);
-
     FILE* exp_pipe = fdopen(pipe_exp[0], "rb");
-    FILE* imp_pipe = fdopen(pipe_imp[1], "wb");
 #endif
 
+    FILE* imp_pipe = fopen(stream_path.c_str(), "wb");
+    if (!imp_pipe) {
+        std::cerr << "[-] Error creating temporary rewrite stream file.\n";
+#if IS_WINDOWS
+        _pclose(exp_pipe);
+#else
+        fclose(exp_pipe);
+        waitpid(pid_exp, nullptr, 0);
+#endif
+        return false;
+    }
+
     std::unordered_map<std::string, std::string> sql_blob_cache;
-    std::unordered_map<std::string, std::string> path_dialect_cache;
-    // Keep every emitted README destination, including those on merged branches.
-    // A later deletion must remove all copies, even if language inference changed.
-    std::unordered_map<std::string, std::set<std::string>> readme_destinations;
     std::unordered_map<std::string, std::string> folder_lang_map;
     std::unordered_map<std::string, std::set<std::string>> folder_lang_set_map;
+
+    // source_destinations accumulates every destination a source path has ever been
+    // written to and is never cleared, even by a D: with divergent branches (e.g. one
+    // side deletes a README while a sibling commit still carries the pre-delete copy
+    // forward untouched), more than one D for the same source can reach this stream
+    // before a later M reintroduces it, and each must still know what to remove. A
+    // redundant "D" for an already-absent path is a harmless no-op for fast-import.
+    // live_destinations is the actual current tree state (destination -> source),
+    // updated in lockstep with what's written to imp_pipe, so collision checks below
+    // can never diverge from what fast-import will actually end up producing.
+    std::unordered_map<std::string, std::set<std::string>> source_destinations;
+    std::map<std::string, std::string> live_destinations;
+    bool collision_found = false;
+    std::string collision_message;
+
+    auto insert_destination = [&](const std::string& dest, const std::string& source) -> bool {
+        auto exact = live_destinations.find(dest);
+        if (exact != live_destinations.end() && exact->second != source) {
+            collision_message = "[-] Destination collision: '" + exact->second + "' and '" + source + "' both map to '" + dest + "'";
+            return false;
+        }
+        size_t slash = dest.find('/');
+        while (slash != std::string::npos) {
+            auto ancestor = live_destinations.find(dest.substr(0, slash));
+            if (ancestor != live_destinations.end() && ancestor->second != source) {
+                collision_message = "[-] File/directory destination collision: '" + ancestor->second + "' and '" + source + "'";
+                return false;
+            }
+            slash = dest.find('/', slash + 1);
+        }
+        auto child = live_destinations.lower_bound(dest + "/");
+        if (child != live_destinations.end() && child->second != source &&
+            child->first.compare(0, dest.size() + 1, dest + "/") == 0) {
+            collision_message = "[-] File/directory destination collision: '" + source + "' and '" + child->second + "'";
+            return false;
+        }
+        live_destinations[dest] = source;
+        return true;
+    };
 
     std::string latest_sha = trim(run_git_command(repo_dir, {"rev-parse", current_branch}));
     if (!latest_sha.empty()) {
@@ -844,7 +861,10 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     auto flush_commit_file_lines = [&]() {
 
-        if (commit_file_lines.empty()) return;
+        if (commit_file_lines.empty() || collision_found) {
+            commit_file_lines.clear();
+            return;
+        }
 
         // Pass 1: Scan code files to update folder_lang_map & folder_lang_set_map
         for (const auto& line_item : commit_file_lines) {
@@ -904,8 +924,13 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             }
         }
 
-        // Pass 2: Transform paths and write to imp_pipe
+        // Pass 2: Transform paths, validate against the live destination tree, and
+        // write to imp_pipe. Stops at the first collision instead of writing further,
+        // since anything already written up to that point is discarded (imp_pipe is
+        // never handed to fast-import when collision_found ends up true).
         for (const auto& line_item : commit_file_lines) {
+            if (collision_found) break;
+
             if (line_item.action == "M") {
                 std::string norm_p = line_item.orig_path;
                 std::replace(norm_p.begin(), norm_p.end(), '\\', '/');
@@ -935,44 +960,48 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     }
                 }
 
+                // A file is never implicitly moved: without an explicit D, its prior
+                // destination(s) genuinely remain present in the tree being built (that
+                // is how fast-import actually behaves), so every destination this source
+                // has ever been given is accumulated here rather than replaced, and only
+                // cleared out together when a later D for this source removes all of them
+                // (see the D branch below). This also covers divergent branches merged
+                // back together, where a sibling commit's untouched copy of this source
+                // must keep resolving to the same destination(s) recorded when it was
+                // last written, independent of what a since-merged-away branch did to it.
+                std::vector<std::string> new_destinations;
                 if (is_readme && mode == "language_first" && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
                     for (const auto& lang : folder_lang_set_map[problem_key]) {
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
-                        std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, single_map);
-                        readme_destinations[line_item.orig_path].insert(new_path);
-                        std::string escaped_new = escape_path(new_path);
-                        std::string new_line = "M " + line_item.fmode + " " + line_item.dataref + " " + escaped_new + "\n";
-                        fputs(new_line.c_str(), imp_pipe);
+                        new_destinations.push_back(PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, single_map));
                     }
                 } else {
+                    new_destinations.push_back(PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map));
+                }
 
-                    std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map);
-                    if (is_readme) readme_destinations[line_item.orig_path].insert(new_path);
-                    if (PathMapper::SQL_CACHE.count(line_item.dataref)) {
-                        path_dialect_cache[line_item.orig_path] = PathMapper::SQL_CACHE[line_item.dataref];
+                for (const auto& new_path : new_destinations) {
+                    if (!insert_destination(new_path, line_item.orig_path)) {
+                        collision_found = true;
+                        break;
                     }
+                    source_destinations[line_item.orig_path].insert(new_path);
                     std::string escaped_new = escape_path(new_path);
                     std::string new_line = "M " + line_item.fmode + " " + line_item.dataref + " " + escaped_new + "\n";
                     fputs(new_line.c_str(), imp_pipe);
                 }
             } else if (line_item.action == "D") {
-                auto readme = readme_destinations.find(line_item.orig_path);
-                if (readme != readme_destinations.end()) {
-                    for (const auto& destination : readme->second) {
-                        std::string deletion = "D " + escape_path(destination) + "\n";
-                        fputs(deletion.c_str(), imp_pipe);
-                    }
+                auto it = source_destinations.find(line_item.orig_path);
+                if (it == source_destinations.end() || it->second.empty()) {
+                    std::cerr << "[!] Warning: delete for a path with no recorded destination ('"
+                              << line_item.orig_path << "') - skipping.\n";
                     continue;
                 }
-                auto it = path_dialect_cache.find(line_item.orig_path);
-                if (it != path_dialect_cache.end()) {
-                    PathMapper::SQL_CACHE["__path__" + line_item.orig_path] = it->second;
+                for (const auto& destination : it->second) {
+                    live_destinations.erase(destination);
+                    std::string deletion = "D " + escape_path(destination) + "\n";
+                    fputs(deletion.c_str(), imp_pipe);
                 }
-                std::string new_path = PathMapper::transform_path(line_item.orig_path, mode, nullptr, "__path__" + line_item.orig_path, folder_lang_map);
-                std::string escaped_new = escape_path(new_path);
-                std::string new_line = "D " + escaped_new + "\n";
-                fputs(new_line.c_str(), imp_pipe);
             } else {
                 fputs(line_item.raw_line.c_str(), imp_pipe);
             }
@@ -983,6 +1012,7 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     char line_buf[8192];
     while (fgets(line_buf, sizeof(line_buf), exp_pipe) != nullptr) {
+        if (collision_found) break;
         std::string line_str(line_buf);
 
         if (state == FREE) {
@@ -1101,29 +1131,47 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     }
     flush_commit_file_lines();
 
-
+    fclose(imp_pipe);
 
 #if IS_WINDOWS
     int status_exp = _pclose(exp_pipe);
-    int status_imp = _pclose(imp_pipe);
     bool ok_exp = (status_exp == 0);
-    bool ok_imp = (status_imp == 0);
 #else
     fclose(exp_pipe);
-    fclose(imp_pipe);
-    int status_exp = 0, status_imp = 0;
+    int status_exp = 0;
     waitpid(pid_exp, &status_exp, 0);
-    waitpid(pid_imp, &status_imp, 0);
     bool ok_exp = WIFEXITED(status_exp) && (WEXITSTATUS(status_exp) == 0);
-    bool ok_imp = WIFEXITED(status_imp) && (WEXITSTATUS(status_imp) == 0);
 #endif
 
-    if (!ok_exp || !ok_imp) {
-        std::cerr << "[-] Error: Git fast-export or fast-import process failed.\n";
+    if (collision_found) {
+        std::cerr << collision_message << "\n";
+        std::cerr << "[-] Refusing to rewrite: no branch ref has been touched.\n";
+        fs::remove(stream_path);
         return false;
     }
 
-    if (run_git_exec(repo_dir, {"checkout", "-f", current_branch}).exit_code != 0) return false;
+    if (!ok_exp) {
+        std::cerr << "[-] Error: git fast-export failed.\n";
+        fs::remove(stream_path);
+        return false;
+    }
+
+    std::cout << "[+] Validation passed. Starting Git history rewrite for branch '" << current_branch << "'...\n";
+    std::string backup_branch = create_backup_branch(repo_dir);
+
+    GitCmdResult import_result = run_fast_import_from_file(repo_dir, stream_path);
+    fs::remove(stream_path);
+    if (import_result.exit_code != 0) {
+        std::cerr << "[-] Error: git fast-import failed.\n";
+        return false;
+    }
+
+    if (run_git_exec(repo_dir, {"checkout", "-f", current_branch}).exit_code != 0) {
+        std::cerr << "[-] Error: checkout of '" << current_branch << "' failed after rewrite. "
+                  << "The rewritten branch ref was updated and original history is backed up in '"
+                  << backup_branch << "'; run 'git checkout -f " << current_branch << "' manually.\n";
+        return false;
+    }
     std::cout << "\n[+] Migration successfully finished! Branch '" << current_branch << "' now points to rewritten history.\n";
     std::cout << "[+] Original history backed up in '" << backup_branch << "'.\n";
     return true;
@@ -1224,13 +1272,17 @@ int main(int argc, char* argv[]) {
             std::getline(std::cin, confirm);
         }
         if (trim(to_lower(confirm)) == "y") {
-            if (is_remote) {
-                retain_temp_dir = true;
-                std::cout << "[+] Repository retained at: " << repo_dir << "\n";
+            if (is_remote) retain_temp_dir = true;
+            if (!execute_rewrite(repo_dir, mode)) {
+                if (is_remote) {
+                    std::cerr << "[-] Migration failed. Cloned repository retained for inspection at: "
+                              << repo_dir << "\n";
+                }
+                return 1;
             }
-            if (!execute_rewrite(repo_dir, mode)) return 1;
 
             if (is_remote) {
+                std::cout << "[+] Repository retained at: " << repo_dir << "\n";
                 std::string push_confirm = "n";
                 if (!yes_flag) {
                     std::cout << "\n============================================================\n";

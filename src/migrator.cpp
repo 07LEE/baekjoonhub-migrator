@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <set>
+#include <map>
 #include <memory>
 
 #include <cstdlib>
@@ -619,6 +620,62 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::cout << "============================================================\n\n";
 }
 
+// Validate complete trees before starting fast-import, which can update branch refs.
+bool validate_destination_paths(const std::string& repo_dir, const std::string& branch,
+                                const std::string& mode) {
+    auto history = run_git_exec(repo_dir, {"log", "--format=%T", branch});
+    if (history.exit_code != 0) return false;
+    std::istringstream trees(history.stdout_str);
+    std::unordered_set<std::string> checked;
+    std::string tree;
+    auto get_content = [&](const std::string& sha) {
+        return run_git_command(repo_dir, {"cat-file", "-p", sha});
+    };
+    while (std::getline(trees, tree)) {
+        if (!checked.insert(tree).second) continue;
+        auto result = run_git_exec(repo_dir, {"ls-tree", "-r", "-z", tree});
+        if (result.exit_code != 0) return false;
+        std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries;
+        std::istringstream records(result.stdout_str);
+        std::string record;
+        while (std::getline(records, record, '\0')) {
+            auto tab = record.find('\t');
+            if (tab == std::string::npos) return false;
+            std::istringstream meta(record.substr(0, tab));
+            std::string file_mode, type, sha;
+            meta >> file_mode >> type >> sha;
+            entries.emplace_back(file_mode, type, sha, record.substr(tab + 1));
+        }
+        auto languages = build_folder_lang_map(entries, get_content);
+        std::map<std::string, std::string> destinations;
+        for (const auto& entry : entries) {
+            const auto& source = std::get<3>(entry);
+            auto destination = PathMapper::transform_path(source, mode, get_content,
+                                                         std::get<2>(entry), languages);
+            auto [it, inserted] = destinations.emplace(destination, source);
+            if (!inserted) {
+                std::cerr << "[-] Destination collision in tree " << tree << ": "
+                          << it->second << " and " << source << " -> " << destination << "\n";
+                return false;
+            }
+        }
+        // A transformed file must not replace another file's parent directory.
+        for (const auto& [destination, source] : destinations) {
+            auto slash = destination.find('/');
+            while (slash != std::string::npos) {
+                auto parent = destinations.find(destination.substr(0, slash));
+                if (parent != destinations.end()) {
+                    std::cerr << "[-] File/directory destination collision: "
+                              << parent->second << " and " << source << "\n";
+                    return false;
+                }
+                slash = destination.find('/', slash + 1);
+            }
+        }
+    }
+    return true;
+}
+
 bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     auto status = run_git_exec(repo_dir, {"status", "--porcelain", "--untracked-files=all"});
     if (status.exit_code != 0 || !status.stdout_str.empty()) {
@@ -629,6 +686,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     if (current_branch == "HEAD" || current_branch.empty()) {
         current_branch = "main";
     }
+
+    if (!validate_destination_paths(repo_dir, current_branch, mode)) return false;
 
     std::cout << "[+] Starting Git history rewrite for branch '" << current_branch << "'...\n";
     std::string backup_branch = create_backup_branch(repo_dir);

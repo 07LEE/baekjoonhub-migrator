@@ -51,6 +51,24 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual((self.repo / path).read_text(), 'valuable work')
                 self.assertEqual(self.git('branch', '--list', 'backup-before-migration'), b'')
 
+    def test_collisions_are_rejected_before_rewriting(self):
+        self.put('Python/백준/Bronze/1/a.py', 'python')
+        self.put('PyPy3/백준/Bronze/1/a.py', 'pypy')
+        self.commit()
+        for historical in (False, True):
+            if historical:
+                (self.repo / 'PyPy3/백준/Bronze/1/a.py').unlink()
+                self.commit()
+            for mode in ('platform_first', 'language_first', 'flat'):
+                with self.subTest(historical=historical, mode=mode):
+                    head = self.git('rev-parse', 'HEAD')
+                    result = self.migrate(mode)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b'collision', result.stderr)
+                    self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+                    self.assertEqual(self.git('status', '--porcelain'), b'')
+                    self.assertEqual(self.git('branch', '--list', 'backup-before-migration'), b'')
+
 
 if __name__ == '__main__':
     unittest.main()

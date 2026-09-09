@@ -619,7 +619,12 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::cout << "============================================================\n\n";
 }
 
-void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
+bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
+    auto status = run_git_exec(repo_dir, {"status", "--porcelain", "--untracked-files=all"});
+    if (status.exit_code != 0 || !status.stdout_str.empty()) {
+        std::cerr << "[-] Refusing to rewrite: working tree must be clean (including untracked files).\n";
+        return false;
+    }
     std::string current_branch = trim(run_git_command(repo_dir, {"rev-parse", "--abbrev-ref", "HEAD"}));
     if (current_branch == "HEAD" || current_branch.empty()) {
         current_branch = "main";
@@ -635,14 +640,14 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     FILE* imp_pipe = _popen(import_cmd.c_str(), "wb");
     if (!exp_pipe || !imp_pipe) {
         std::cerr << "[-] Error creating process pipe for fast-export/import.\n";
-        return;
+        return false;
     }
 #else
     int pipe_exp[2];
     int pipe_imp[2];
     if (pipe(pipe_exp) < 0 || pipe(pipe_imp) < 0) {
         std::cerr << "[-] Error creating POSIX pipes.\n";
-        return;
+        return false;
     }
 
     pid_t pid_exp = fork();
@@ -1043,12 +1048,13 @@ void execute_rewrite(const std::string& repo_dir, const std::string& mode) {
 
     if (!ok_exp || !ok_imp) {
         std::cerr << "[-] Error: Git fast-export or fast-import process failed.\n";
-        return;
+        return false;
     }
 
-    run_git_command(repo_dir, {"checkout", "-f", current_branch});
+    if (run_git_exec(repo_dir, {"checkout", "-f", current_branch}).exit_code != 0) return false;
     std::cout << "\n[+] Migration successfully finished! Branch '" << current_branch << "' now points to rewritten history.\n";
     std::cout << "[+] Original history backed up in '" << backup_branch << "'.\n";
+    return true;
 }
 
 int main(int argc, char* argv[]) {
@@ -1145,7 +1151,7 @@ int main(int argc, char* argv[]) {
             std::getline(std::cin, confirm);
         }
         if (trim(to_lower(confirm)) == "y") {
-            execute_rewrite(repo_dir, mode);
+            if (!execute_rewrite(repo_dir, mode)) return 1;
 
             if (is_remote) {
                 std::string push_confirm = "n";

@@ -1,0 +1,56 @@
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+BINARY = str(pathlib.Path(sys.argv.pop(1)).resolve())
+
+
+class RegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='migrator-regression-')
+        self.addCleanup(self.temp.cleanup)
+        self.repo = pathlib.Path(self.temp.name) / 'repo'
+        self.repo.mkdir()
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.name', 'Test')
+        self.git('config', 'user.email', 'test@example.com')
+
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.repo), *args])
+
+    def put(self, path, content):
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+
+    def commit(self):
+        self.git('add', '.')
+        self.git('commit', '-qm', 'fixture')
+
+    def migrate(self, mode='platform_first'):
+        return subprocess.run([BINARY, '--repo', str(self.repo), '--mode', mode, '-y'],
+                              capture_output=True, timeout=30)
+
+    def test_dirty_worktree_is_preserved(self):
+        self.put('README.md', 'committed')
+        self.commit()
+        head = self.git('rev-parse', 'HEAD')
+        for kind in ('unstaged', 'staged', 'untracked'):
+            with self.subTest(kind=kind):
+                self.git('restore', '--staged', '--worktree', '.')
+                path = 'new.txt' if kind == 'untracked' else 'README.md'
+                self.put(path, 'valuable work')
+                if kind == 'staged':
+                    self.git('add', path)
+                before = self.git('status', '--porcelain')
+                self.assertNotEqual(self.migrate().returncode, 0)
+                self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+                self.assertEqual(self.git('status', '--porcelain'), before)
+                self.assertEqual((self.repo / path).read_text(), 'valuable work')
+                self.assertEqual(self.git('branch', '--list', 'backup-before-migration'), b'')
+
+
+if __name__ == '__main__':
+    unittest.main()

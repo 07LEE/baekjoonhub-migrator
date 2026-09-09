@@ -172,3 +172,5 @@ if [ -n "${BAD_PATHS}" ]; then
 fi
 
 echo "[+] E2E Test Passed Successfully! All checks 100% clean."
+
+python3 "${PROJECT_ROOT}/tests/test_regressions.py" "${MIGRATOR_BIN}"

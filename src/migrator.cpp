@@ -803,6 +803,9 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     std::unordered_map<std::string, std::string> sql_blob_cache;
     std::unordered_map<std::string, std::string> folder_lang_map;
     std::unordered_map<std::string, std::set<std::string>> folder_lang_set_map;
+    // Language folders that already hold their own README for a problem (HEAD tree).
+    // A README is only copied into languages missing from this set.
+    std::unordered_map<std::string, std::set<std::string>> readme_lang_dirs;
 
     // source_destinations accumulates every destination a source path has ever been
     // written to and is never cleared, even by a D: with divergent branches (e.g. one
@@ -883,6 +886,27 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             return run_git_command(repo_dir, {"cat-file", "-p", sha});
         };
         folder_lang_map = build_folder_lang_map(tree_entries, content_getter_pre);
+        for (const auto& entry : tree_entries) {
+            std::string norm_r = std::get<3>(entry);
+            std::replace(norm_r.begin(), norm_r.end(), '\\', '/');
+            std::vector<std::string> rp;
+            std::stringstream rss(norm_r);
+            std::string rpart;
+            while (std::getline(rss, rpart, '/')) {
+                if (!rpart.empty()) rp.push_back(rpart);
+            }
+            if (rp.size() < 3 || to_lower(rp.back()) != "readme.md") continue;
+            std::string r_top = is_python_family_name(rp[0]) ? "Python" : rp[0];
+            if (PathMapper::PLATFORMS.count(r_top) == 0 && PathMapper::PLATFORMS.count(rp[1]) != 0 &&
+                PathMapper::is_language_dir(r_top)) {
+                std::string r_key;
+                for (size_t i = 1; i + 1 < rp.size(); ++i) {
+                    if (i > 1) r_key += "/";
+                    r_key += rp[i];
+                }
+                readme_lang_dirs[r_key].insert(r_top);
+            }
+        }
         for (const auto& entry : tree_entries) {
             std::string path = std::get<3>(entry);
             std::string sha = std::get<2>(entry);
@@ -1081,8 +1105,18 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 bool in_language_dir = PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() &&
                                        PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end() &&
                                        PathMapper::is_language_dir(top_dir);
-                if (is_readme && mode == "language_first" && !in_language_dir && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
-                    for (const auto& lang : folder_lang_set_map[problem_key]) {
+                if (is_readme && mode == "language_first" && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
+                    std::set<std::string> langs = folder_lang_set_map[problem_key];
+                    if (in_language_dir) langs.insert(top_dir);
+                    for (const auto& lang : langs) {
+                        if (in_language_dir) {
+                            // Keep this README in its own language folder and copy it to the
+                            // others only where they have no README of their own.
+                            if (lang != top_dir && readme_lang_dirs[problem_key].count(lang)) continue;
+                            std::string own = PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, folder_lang_map);
+                            new_destinations.push_back(lang + own.substr(own.find('/')));
+                            continue;
+                        }
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
                         new_destinations.push_back(PathMapper::transform_path(line_item.orig_path, mode, content_getter, line_item.dataref, single_map));

@@ -815,11 +815,12 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     // can never diverge from what fast-import will actually end up producing.
     std::unordered_map<std::string, std::set<std::string>> source_destinations;
     std::map<std::string, std::string> live_destinations;
-    // Identical READMEs from different sources may share one destination when the
-    // language folder is dropped (platform_first / flat). dest_owners records every
-    // source currently backing a destination and live_dataref its content.
-    std::map<std::string, std::set<std::string>> dest_owners;
-    std::map<std::string, std::string> live_dataref;
+    // READMEs from different sources may share one destination when the language
+    // folder is dropped (platform_first / flat), as long as they agree once a commit
+    // is complete. dest_owners maps a destination to each backing source's content, and
+    // merged_touched lists the shared destinations written by the current commit.
+    std::map<std::string, std::map<std::string, std::string>> dest_owners;
+    std::set<std::string> merged_touched;
     bool collision_found = false;
     std::string collision_message;
 
@@ -828,11 +829,12 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         auto exact = live_destinations.find(dest);
         if (exact != live_destinations.end()) {
             const auto& owners = dest_owners[dest];
-            bool other_owner = owners.size() > 1 || owners.count(source) == 0;
-            if (other_owner && !(mergeable && live_dataref[dest] == dataref)) {
-                std::string other = exact->second != source ? exact->second : *owners.begin();
-                if (other == source && owners.size() > 1) other = *owners.rbegin();
-                collision_message = "[-] Destination collision: '" + other + "' and '" + source + "' both map to '" + dest + "'";
+            bool joins = owners.count(source) == 0;
+            // A new source may only join a shared destination with the same content.
+            // An existing owner may update its own copy; agreement is checked when
+            // the commit ends.
+            if (joins && !(mergeable && owners.begin()->second == dataref)) {
+                collision_message = "[-] Destination collision: '" + exact->second + "' and '" + source + "' both map to '" + dest + "'";
                 return false;
             }
         }
@@ -852,8 +854,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             return false;
         }
         live_destinations[dest] = source;
-        live_dataref[dest] = dataref;
-        dest_owners[dest].insert(source);
+        dest_owners[dest][source] = dataref;
+        if (dest_owners[dest].size() > 1) merged_touched.insert(dest);
         return true;
     };
 
@@ -1112,13 +1114,12 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                         owners->second.erase(line_item.orig_path);
                         if (!owners->second.empty()) {
                             // Another source still backs this merged destination.
-                            live_destinations[destination] = *owners->second.begin();
+                            live_destinations[destination] = owners->second.begin()->first;
                             continue;
                         }
                         dest_owners.erase(owners);
                     }
                     live_destinations.erase(destination);
-                    live_dataref.erase(destination);
                     std::string deletion = "D " + escape_path(destination) + "\n";
                     fputs(deletion.c_str(), imp_pipe);
                 }
@@ -1126,6 +1127,20 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 fputs(line_item.raw_line.c_str(), imp_pipe);
             }
         }
+        for (const auto& dest : merged_touched) {
+            auto owners = dest_owners.find(dest);
+            if (owners == dest_owners.end() || collision_found) continue;
+            const std::string& first_ref = owners->second.begin()->second;
+            for (const auto& owner : owners->second) {
+                if (owner.second != first_ref) {
+                    collision_message = "[-] Destination collision: '" + owners->second.begin()->first + "' and '" +
+                                        owner.first + "' both map to '" + dest + "' with different content";
+                    collision_found = true;
+                    break;
+                }
+            }
+        }
+        merged_touched.clear();
         commit_file_lines.clear();
     };
 

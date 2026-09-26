@@ -239,6 +239,21 @@ class RegressionTests(unittest.TestCase):
         self.assertNotEqual(self.migrate('platform_first').returncode, 0)
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
 
+    def test_readmes_updated_together_are_merged_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        self.put('Python/백준/Bronze/1/README.md', 'updated')
+        self.put('Java/백준/Bronze/1/README.md', 'updated')
+        self.commit()
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('show', 'HEAD:백준/Bronze/1/README.md'), b'updated')
+
+    def test_readmes_diverging_after_a_commit_collide_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        self.put('Python/백준/Bronze/1/README.md', 'updated')
+        self.commit()
+        self.assertNotEqual(self.migrate('platform_first').returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

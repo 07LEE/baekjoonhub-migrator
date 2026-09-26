@@ -589,6 +589,33 @@ std::unordered_map<std::string, std::string> build_folder_lang_map(
     return folder_map;
 }
 
+// Languages of problem folders as seen anywhere in history, for folders whose current
+// files carry no usable extension (e.g. BaekjoonHub's old "<title>.undefined" uploads).
+// Only fills keys the caller does not already have. The rewrite itself already carries
+// these forward commit by commit; this gives the HEAD-only preview the same answer.
+void merge_history_folder_langs(
+    const std::string& repo_dir,
+    const std::string& rev,
+    std::unordered_map<std::string, std::string>& folder_map
+) {
+    std::string out = run_git_command(repo_dir, {"log", "--name-only", "-z", "--format=", rev});
+    std::set<std::string> seen;
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries;
+    size_t pos = 0;
+    while (pos < out.length()) {
+        size_t null_pos = out.find('\0', pos);
+        if (null_pos == std::string::npos) null_pos = out.length();
+        std::string path = trim(out.substr(pos, null_pos - pos));
+        pos = null_pos + 1;
+        if (!path.empty() && seen.insert(path).second) {
+            entries.emplace_back("100644", "blob", "", path);
+        }
+    }
+    for (const auto& kv : build_folder_lang_map(entries)) {
+        folder_map.insert(kv);
+    }
+}
+
 void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::string commits_out = run_git_command(repo_dir, {"log", "--reverse", "--format=%H"});
     std::stringstream ss(commits_out);
@@ -614,6 +641,7 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     int count = 0;
     int changed_count = 0;
     int total_files = 0;
+    int unrecognized_count = 0;
 
     auto content_getter = [&](const std::string& sha) -> std::string {
         return run_git_command(repo_dir, {"cat-file", "-p", sha});
@@ -641,6 +669,7 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     }
 
     auto folder_lang_map = build_folder_lang_map(entries_list, content_getter);
+    merge_history_folder_langs(repo_dir, latest_sha, folder_lang_map);
 
     for (const auto& entry : entries_list) {
         total_files++;
@@ -648,6 +677,17 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         std::string sha = std::get<2>(entry);
 
         std::string new_path = PathMapper::transform_path(path, mode, content_getter, sha, folder_lang_map);
+        if (new_path == path && path.find('/') != std::string::npos) {
+            // Unchanged is normal for paths already in the target layout; only flag
+            // those where no platform folder sits in the first or second position.
+            size_t first = path.find('/');
+            size_t second = path.find('/', first + 1);
+            std::string top = path.substr(0, first);
+            std::string next = second == std::string::npos ? "" : path.substr(first + 1, second - first - 1);
+            if (PathMapper::PLATFORMS.count(top) == 0 && PathMapper::PLATFORMS.count(next) == 0) {
+                unrecognized_count++;
+            }
+        }
         if (count < 20) {
             if (new_path != path) {
                 std::cout << " [MOVE] " << path << "\n     -> " << new_path << "\n";
@@ -660,6 +700,9 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     }
 
     std::cout << "\nSample preview completed. (" << changed_count << " files moved out of first " << count << " shown, " << total_files << " total files)\n";
+    if (unrecognized_count > 0) {
+        std::cout << "[!] " << unrecognized_count << " files have no platform folder in their first two path levels and will be left as-is.\n";
+    }
     std::cout << "============================================================\n\n";
 }
 

@@ -188,6 +188,25 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(sorted(f for f in files if f),
                          sorted(f'프로그래머스/{n}/{n}/a.py'.encode() for n in (1, 2, 3)))
 
+    def test_undefined_extension_takes_language_from_folder_history(self):
+        self.put('백준/Silver/4. D/D.py', 'code')
+        self.commit()
+        self.git('rm', '-q', '백준/Silver/4. D/D.py')
+        self.put('백준/Silver/4. D/D.undefined', 'code')
+        self.commit()
+        self.put('goormlevel/LEVEL 1/x/x.undefined', 'code')
+        self.commit()
+        expected = {'Python/백준/Silver/4. D/D.undefined',
+                    'Misc/goormlevel/LEVEL 1/x/x.undefined'}
+        preview = subprocess.run([BINARY, '--repo', str(self.repo), '--mode', 'language_first', '--dry-run'],
+                                 capture_output=True, text=True, timeout=30).stdout
+        for path in expected:
+            self.assertIn('-> ' + path, preview)
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        self.assertEqual({f.decode() for f in files if f}, expected)
+
 
 if __name__ == '__main__':
     unittest.main()

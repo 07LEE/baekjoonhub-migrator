@@ -143,6 +143,117 @@ class RegressionTests(unittest.TestCase):
                     self.assertEqual(self.git('show', rewritten.decode() + ':' + path),
                                      self.git('show', original.decode() + ':' + problem + 'README.md'))
 
+    def test_baekjoonhub_python_folder_migration_commit_is_rewritten(self):
+        # BaekjoonHub #346 moves Python3/ and PyPy3/ into Python/ with one commit;
+        # both sides of that move map to the same destination here.
+        expected = {
+            'platform_first': '백준/Bronze/1/',
+            'flat': '백준/Bronze/1/',
+            'language_first': 'Python/백준/Bronze/1/',
+        }
+        for mode, prefix in expected.items():
+            with self.subTest(mode=mode):
+                self.repo = pathlib.Path(self.temp.name) / mode
+                self.repo.mkdir()
+                self.git('init', '-q', '-b', 'main')
+                self.git('config', 'user.name', 'Test')
+                self.git('config', 'user.email', 'test@example.com')
+                self.put('Python3/백준/Bronze/1/a.py', 'solution')
+                self.put('Python3/백준/Bronze/1/README.md', 'doc')
+                self.commit()
+                self.git('mv', 'Python3', 'Python')
+                self.commit()
+                self.put('Python/백준/Bronze/1/a.py', 'resubmitted')
+                self.commit()
+                result = self.migrate(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                old = self.git('rev-list', 'backup-before-migration').splitlines()
+                new = self.git('rev-list', 'HEAD').splitlines()
+                self.assertEqual(len(old), len(new))
+                for rewritten in new:
+                    files = self.git('ls-tree', '-r', '-z', '--name-only', rewritten.decode()).split(b'\0')
+                    self.assertEqual(sorted(f for f in files if f),
+                                     sorted((prefix + name).encode() for name in ('README.md', 'a.py')))
+                self.assertEqual(self.git('show', 'HEAD~1:' + prefix + 'a.py'), b'solution')
+                self.assertEqual(self.git('show', 'HEAD:' + prefix + 'a.py'), b'resubmitted')
+
+    def test_programmers_level_folders_are_normalized(self):
+        self.put('프로그래머스/lv1/1/a.py', 'one')
+        self.put('프로그래머스/Lv.2/2/a.py', 'two')
+        self.put('프로그래머스/3/3/a.py', 'three')
+        self.commit()
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        self.assertEqual(sorted(f for f in files if f),
+                         sorted(f'프로그래머스/{n}/{n}/a.py'.encode() for n in (1, 2, 3)))
+
+    def test_undefined_extension_takes_language_from_folder_history(self):
+        self.put('백준/Silver/4. D/D.py', 'code')
+        self.commit()
+        self.git('rm', '-q', '백준/Silver/4. D/D.py')
+        self.put('백준/Silver/4. D/D.undefined', 'code')
+        self.commit()
+        self.put('goormlevel/LEVEL 1/x/x.undefined', 'code')
+        self.commit()
+        expected = {'Python/백준/Silver/4. D/D.undefined',
+                    'Misc/goormlevel/LEVEL 1/x/x.undefined'}
+        preview = subprocess.run([BINARY, '--repo', str(self.repo), '--mode', 'language_first', '--dry-run'],
+                                 capture_output=True, text=True, timeout=30).stdout
+        for path in expected:
+            self.assertIn('-> ' + path, preview)
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        self.assertEqual({f.decode() for f in files if f}, expected)
+
+    def setup_two_language_readmes(self, java_readme):
+        self.put('Python/백준/Bronze/1/a.py', 'py')
+        self.put('Python/백준/Bronze/1/README.md', 'doc')
+        self.put('Java/백준/Bronze/1/A.java', 'java')
+        self.put('Java/백준/Bronze/1/README.md', java_readme)
+        self.commit()
+
+    def rewritten_files(self):
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        return sorted(f.decode() for f in files if f)
+
+    def test_per_language_readmes_are_kept_in_language_first(self):
+        self.setup_two_language_readmes('doc')
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rewritten_files(), sorted(
+            f'{lang}/백준/Bronze/1/{name}' for lang, name in
+            [('Python', 'a.py'), ('Python', 'README.md'), ('Java', 'A.java'), ('Java', 'README.md')]))
+
+    def test_identical_readmes_are_merged_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rewritten_files(),
+                         ['백준/Bronze/1/A.java', '백준/Bronze/1/README.md', '백준/Bronze/1/a.py'])
+
+    def test_different_readmes_still_collide_in_platform_first(self):
+        self.setup_two_language_readmes('other doc')
+        head = self.git('rev-parse', 'HEAD')
+        self.assertNotEqual(self.migrate('platform_first').returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_readmes_updated_together_are_merged_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        self.put('Python/백준/Bronze/1/README.md', 'updated')
+        self.put('Java/백준/Bronze/1/README.md', 'updated')
+        self.commit()
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git('show', 'HEAD:백준/Bronze/1/README.md'), b'updated')
+
+    def test_readmes_diverging_after_a_commit_collide_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        self.put('Python/백준/Bronze/1/README.md', 'updated')
+        self.commit()
+        self.assertNotEqual(self.migrate('platform_first').returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

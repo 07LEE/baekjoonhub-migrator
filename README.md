@@ -18,7 +18,7 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
 
 3. Automatic Directory Normalization
    - Standardizes legacy Python-family directory names (`Python3/`, `PyPy3/`, `Python 3/`, etc.) to `Python`, matching BaekjoonHub's own folder standardization.
-   - Standardizes level directory names (e.g. `lv1` -> `1`, `2`, `3`) to align with BaekjoonHub specifications.
+   - Standardizes level directory names (e.g. `lv1`, `Lv.1` -> `1`) to align with BaekjoonHub specifications.
 
 4. High Performance & Zero Dependencies
    - Powered by a standalone C++ engine with zero external runtime dependencies.

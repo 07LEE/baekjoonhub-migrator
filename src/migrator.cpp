@@ -259,7 +259,30 @@ public:
         {".mysql", "MySQL"},
         {".cs", "C#"},
         {".sh", "Bash"},
-        {".gs", "Golfscript"}
+        {".gs", "Golfscript"},
+        {".cxx", "C++"},
+        {".kts", "Kotlin"},
+        {".scala", "Scala"},
+        {".php", "PHP"},
+        {".dart", "Dart"},
+        {".lua", "Lua"},
+        {".r", "R"},
+        {".hs", "Haskell"},
+        {".pl", "Perl"},
+        {".jl", "Julia"},
+        {".ml", "OCaml"},
+        {".fs", "F#"},
+        {".vb", "Visual Basic"},
+        {".pas", "Pascal"},
+        {".groovy", "Groovy"},
+        {".clj", "Clojure"},
+        {".ex", "Elixir"},
+        {".erl", "Erlang"},
+        {".d", "D"},
+        {".nim", "Nim"},
+        {".zig", "Zig"},
+        {".f90", "Fortran"},
+        {".asm", "Assembly"}
     };
 
     static inline const std::unordered_set<std::string> PLATFORMS = {
@@ -267,6 +290,14 @@ public:
     };
 
     static inline std::unordered_map<std::string, std::string> SQL_CACHE;
+
+    // True when a top-level directory is already a language folder ("Python/백준/...").
+    static bool is_language_dir(const std::string& name) {
+        for (const auto& kv : LANGUAGE_EXTENSIONS) {
+            if (kv.second == name) return true;
+        }
+        return false;
+    }
 
     static std::string detect_sql_dialect(const std::string& content) {
         std::string upper_content = to_upper(content);
@@ -356,8 +387,13 @@ public:
         }
 
 
+        // A file already inside a language folder keeps it: several languages can share
+        // one problem folder key, and the folder map would pick just one of them.
+        bool in_language_dir = PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() &&
+                               PLATFORMS.find(sub_parts[0]) != PLATFORMS.end() && is_language_dir(top_dir);
+
         // Fallback to folder_lang_map if language isn't directly detected from this file
-        if (detected_lang.empty() && !folder_lang_map.empty() && parts.size() > 1) {
+        if (detected_lang.empty() && !in_language_dir && !folder_lang_map.empty() && parts.size() > 1) {
             std::string problem_key = "";
             if (PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() && PLATFORMS.find(sub_parts[0]) != PLATFORMS.end()) {
                 for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
@@ -396,12 +432,13 @@ public:
             return path;
         }
 
-        // Normalize Programmers level folders
+        // Normalize Programmers level folders: "lv1" and "Lv.1" both become "1",
+        // matching BaekjoonHub's removeProgrammersRank() (#345).
         if (platform == "프로그래머스" && !rel_path_parts.empty()) {
             std::string level_dir = rel_path_parts[0];
             std::string lower_level = to_lower(level_dir);
             if (lower_level.rfind("lv", 0) == 0) {
-                std::string digits = level_dir.substr(2);
+                std::string digits = level_dir.substr(lower_level.rfind("lv.", 0) == 0 ? 3 : 2);
                 bool all_digits = !digits.empty() && std::all_of(digits.begin(), digits.end(), ::isdigit);
                 if (all_digits) {
                     rel_path_parts[0] = digits;
@@ -588,6 +625,33 @@ std::unordered_map<std::string, std::string> build_folder_lang_map(
     return folder_map;
 }
 
+// Languages of problem folders as seen anywhere in history, for folders whose current
+// files carry no usable extension (e.g. BaekjoonHub's old "<title>.undefined" uploads).
+// Only fills keys the caller does not already have. The rewrite itself already carries
+// these forward commit by commit; this gives the HEAD-only preview the same answer.
+void merge_history_folder_langs(
+    const std::string& repo_dir,
+    const std::string& rev,
+    std::unordered_map<std::string, std::string>& folder_map
+) {
+    std::string out = run_git_command(repo_dir, {"log", "--name-only", "-z", "--format=", rev});
+    std::set<std::string> seen;
+    std::vector<std::tuple<std::string, std::string, std::string, std::string>> entries;
+    size_t pos = 0;
+    while (pos < out.length()) {
+        size_t null_pos = out.find('\0', pos);
+        if (null_pos == std::string::npos) null_pos = out.length();
+        std::string path = trim(out.substr(pos, null_pos - pos));
+        pos = null_pos + 1;
+        if (!path.empty() && seen.insert(path).second) {
+            entries.emplace_back("100644", "blob", "", path);
+        }
+    }
+    for (const auto& kv : build_folder_lang_map(entries)) {
+        folder_map.insert(kv);
+    }
+}
+
 void preview_migration(const std::string& repo_dir, const std::string& mode) {
     std::string commits_out = run_git_command(repo_dir, {"log", "--reverse", "--format=%H"});
     std::stringstream ss(commits_out);
@@ -613,6 +677,7 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     int count = 0;
     int changed_count = 0;
     int total_files = 0;
+    int unrecognized_count = 0;
 
     auto content_getter = [&](const std::string& sha) -> std::string {
         return run_git_command(repo_dir, {"cat-file", "-p", sha});
@@ -640,6 +705,7 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     }
 
     auto folder_lang_map = build_folder_lang_map(entries_list, content_getter);
+    merge_history_folder_langs(repo_dir, latest_sha, folder_lang_map);
 
     for (const auto& entry : entries_list) {
         total_files++;
@@ -647,6 +713,17 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
         std::string sha = std::get<2>(entry);
 
         std::string new_path = PathMapper::transform_path(path, mode, content_getter, sha, folder_lang_map);
+        if (new_path == path && path.find('/') != std::string::npos) {
+            // Unchanged is normal for paths already in the target layout; only flag
+            // those where no platform folder sits in the first or second position.
+            size_t first = path.find('/');
+            size_t second = path.find('/', first + 1);
+            std::string top = path.substr(0, first);
+            std::string next = second == std::string::npos ? "" : path.substr(first + 1, second - first - 1);
+            if (PathMapper::PLATFORMS.count(top) == 0 && PathMapper::PLATFORMS.count(next) == 0) {
+                unrecognized_count++;
+            }
+        }
         if (count < 20) {
             if (new_path != path) {
                 std::cout << " [MOVE] " << path << "\n     -> " << new_path << "\n";
@@ -659,6 +736,9 @@ void preview_migration(const std::string& repo_dir, const std::string& mode) {
     }
 
     std::cout << "\nSample preview completed. (" << changed_count << " files moved out of first " << count << " shown, " << total_files << " total files)\n";
+    if (unrecognized_count > 0) {
+        std::cout << "[!] " << unrecognized_count << " files have no platform folder in their first two path levels and will be left as-is.\n";
+    }
     std::cout << "============================================================\n\n";
 }
 
@@ -735,14 +815,28 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     // can never diverge from what fast-import will actually end up producing.
     std::unordered_map<std::string, std::set<std::string>> source_destinations;
     std::map<std::string, std::string> live_destinations;
+    // READMEs from different sources may share one destination when the language
+    // folder is dropped (platform_first / flat), as long as they agree once a commit
+    // is complete. dest_owners maps a destination to each backing source's content, and
+    // merged_touched lists the shared destinations written by the current commit.
+    std::map<std::string, std::map<std::string, std::string>> dest_owners;
+    std::set<std::string> merged_touched;
     bool collision_found = false;
     std::string collision_message;
 
-    auto insert_destination = [&](const std::string& dest, const std::string& source) -> bool {
+    auto insert_destination = [&](const std::string& dest, const std::string& source,
+                                  const std::string& dataref, bool mergeable) -> bool {
         auto exact = live_destinations.find(dest);
-        if (exact != live_destinations.end() && exact->second != source) {
-            collision_message = "[-] Destination collision: '" + exact->second + "' and '" + source + "' both map to '" + dest + "'";
-            return false;
+        if (exact != live_destinations.end()) {
+            const auto& owners = dest_owners[dest];
+            bool joins = owners.count(source) == 0;
+            // A new source may only join a shared destination with the same content.
+            // An existing owner may update its own copy; agreement is checked when
+            // the commit ends.
+            if (joins && !(mergeable && owners.begin()->second == dataref)) {
+                collision_message = "[-] Destination collision: '" + exact->second + "' and '" + source + "' both map to '" + dest + "'";
+                return false;
+            }
         }
         size_t slash = dest.find('/');
         while (slash != std::string::npos) {
@@ -760,6 +854,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             return false;
         }
         live_destinations[dest] = source;
+        dest_owners[dest][source] = dataref;
+        if (dest_owners[dest].size() > 1) merged_touched.insert(dest);
         return true;
     };
 
@@ -928,7 +1024,19 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         // write to imp_pipe. Stops at the first collision instead of writing further,
         // since anything already written up to that point is discarded (imp_pipe is
         // never handed to fast-import when collision_found ends up true).
+        // Deletions are applied before modifications. BaekjoonHub's own folder migration
+        // (#346) moves Python3/... to Python/... in a single commit, and both paths map to
+        // the same destination here; handling the D first frees that destination for the
+        // M instead of reporting a collision or deleting the file that was just written.
+        std::vector<const CommitFileLine*> ordered_lines;
         for (const auto& line_item : commit_file_lines) {
+            if (line_item.action == "D") ordered_lines.push_back(&line_item);
+        }
+        for (const auto& line_item : commit_file_lines) {
+            if (line_item.action != "D") ordered_lines.push_back(&line_item);
+        }
+        for (const CommitFileLine* line_ptr : ordered_lines) {
+            const auto& line_item = *line_ptr;
             if (collision_found) break;
 
             if (line_item.action == "M") {
@@ -970,7 +1078,10 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 // must keep resolving to the same destination(s) recorded when it was
                 // last written, independent of what a since-merged-away branch did to it.
                 std::vector<std::string> new_destinations;
-                if (is_readme && mode == "language_first" && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
+                bool in_language_dir = PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() &&
+                                       PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end() &&
+                                       PathMapper::is_language_dir(top_dir);
+                if (is_readme && mode == "language_first" && !in_language_dir && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
                     for (const auto& lang : folder_lang_set_map[problem_key]) {
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
@@ -981,7 +1092,7 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 }
 
                 for (const auto& new_path : new_destinations) {
-                    if (!insert_destination(new_path, line_item.orig_path)) {
+                    if (!insert_destination(new_path, line_item.orig_path, line_item.dataref, is_readme && mode != "language_first")) {
                         collision_found = true;
                         break;
                     }
@@ -998,6 +1109,16 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     continue;
                 }
                 for (const auto& destination : it->second) {
+                    auto owners = dest_owners.find(destination);
+                    if (owners != dest_owners.end()) {
+                        owners->second.erase(line_item.orig_path);
+                        if (!owners->second.empty()) {
+                            // Another source still backs this merged destination.
+                            live_destinations[destination] = owners->second.begin()->first;
+                            continue;
+                        }
+                        dest_owners.erase(owners);
+                    }
                     live_destinations.erase(destination);
                     std::string deletion = "D " + escape_path(destination) + "\n";
                     fputs(deletion.c_str(), imp_pipe);
@@ -1006,6 +1127,20 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 fputs(line_item.raw_line.c_str(), imp_pipe);
             }
         }
+        for (const auto& dest : merged_touched) {
+            auto owners = dest_owners.find(dest);
+            if (owners == dest_owners.end() || collision_found) continue;
+            const std::string& first_ref = owners->second.begin()->second;
+            for (const auto& owner : owners->second) {
+                if (owner.second != first_ref) {
+                    collision_message = "[-] Destination collision: '" + owners->second.begin()->first + "' and '" +
+                                        owner.first + "' both map to '" + dest + "' with different content";
+                    collision_found = true;
+                    break;
+                }
+            }
+        }
+        merged_touched.clear();
         commit_file_lines.clear();
     };
 

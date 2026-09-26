@@ -143,6 +143,51 @@ class RegressionTests(unittest.TestCase):
                     self.assertEqual(self.git('show', rewritten.decode() + ':' + path),
                                      self.git('show', original.decode() + ':' + problem + 'README.md'))
 
+    def test_baekjoonhub_python_folder_migration_commit_is_rewritten(self):
+        # BaekjoonHub #346 moves Python3/ and PyPy3/ into Python/ with one commit;
+        # both sides of that move map to the same destination here.
+        expected = {
+            'platform_first': '백준/Bronze/1/',
+            'flat': '백준/Bronze/1/',
+            'language_first': 'Python/백준/Bronze/1/',
+        }
+        for mode, prefix in expected.items():
+            with self.subTest(mode=mode):
+                self.repo = pathlib.Path(self.temp.name) / mode
+                self.repo.mkdir()
+                self.git('init', '-q', '-b', 'main')
+                self.git('config', 'user.name', 'Test')
+                self.git('config', 'user.email', 'test@example.com')
+                self.put('Python3/백준/Bronze/1/a.py', 'solution')
+                self.put('Python3/백준/Bronze/1/README.md', 'doc')
+                self.commit()
+                self.git('mv', 'Python3', 'Python')
+                self.commit()
+                self.put('Python/백준/Bronze/1/a.py', 'resubmitted')
+                self.commit()
+                result = self.migrate(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                old = self.git('rev-list', 'backup-before-migration').splitlines()
+                new = self.git('rev-list', 'HEAD').splitlines()
+                self.assertEqual(len(old), len(new))
+                for rewritten in new:
+                    files = self.git('ls-tree', '-r', '-z', '--name-only', rewritten.decode()).split(b'\0')
+                    self.assertEqual(sorted(f for f in files if f),
+                                     sorted((prefix + name).encode() for name in ('README.md', 'a.py')))
+                self.assertEqual(self.git('show', 'HEAD~1:' + prefix + 'a.py'), b'solution')
+                self.assertEqual(self.git('show', 'HEAD:' + prefix + 'a.py'), b'resubmitted')
+
+    def test_programmers_level_folders_are_normalized(self):
+        self.put('프로그래머스/lv1/1/a.py', 'one')
+        self.put('프로그래머스/Lv.2/2/a.py', 'two')
+        self.put('프로그래머스/3/3/a.py', 'three')
+        self.commit()
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        self.assertEqual(sorted(f for f in files if f),
+                         sorted(f'프로그래머스/{n}/{n}/a.py'.encode() for n in (1, 2, 3)))
+
 
 if __name__ == '__main__':
     unittest.main()

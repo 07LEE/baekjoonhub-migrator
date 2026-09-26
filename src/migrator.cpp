@@ -396,12 +396,13 @@ public:
             return path;
         }
 
-        // Normalize Programmers level folders
+        // Normalize Programmers level folders: "lv1" and "Lv.1" both become "1",
+        // matching BaekjoonHub's removeProgrammersRank() (#345).
         if (platform == "프로그래머스" && !rel_path_parts.empty()) {
             std::string level_dir = rel_path_parts[0];
             std::string lower_level = to_lower(level_dir);
             if (lower_level.rfind("lv", 0) == 0) {
-                std::string digits = level_dir.substr(2);
+                std::string digits = level_dir.substr(lower_level.rfind("lv.", 0) == 0 ? 3 : 2);
                 bool all_digits = !digits.empty() && std::all_of(digits.begin(), digits.end(), ::isdigit);
                 if (all_digits) {
                     rel_path_parts[0] = digits;
@@ -928,7 +929,19 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
         // write to imp_pipe. Stops at the first collision instead of writing further,
         // since anything already written up to that point is discarded (imp_pipe is
         // never handed to fast-import when collision_found ends up true).
+        // Deletions are applied before modifications. BaekjoonHub's own folder migration
+        // (#346) moves Python3/... to Python/... in a single commit, and both paths map to
+        // the same destination here; handling the D first frees that destination for the
+        // M instead of reporting a collision or deleting the file that was just written.
+        std::vector<const CommitFileLine*> ordered_lines;
         for (const auto& line_item : commit_file_lines) {
+            if (line_item.action == "D") ordered_lines.push_back(&line_item);
+        }
+        for (const auto& line_item : commit_file_lines) {
+            if (line_item.action != "D") ordered_lines.push_back(&line_item);
+        }
+        for (const CommitFileLine* line_ptr : ordered_lines) {
+            const auto& line_item = *line_ptr;
             if (collision_found) break;
 
             if (line_item.action == "M") {

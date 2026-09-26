@@ -259,7 +259,30 @@ public:
         {".mysql", "MySQL"},
         {".cs", "C#"},
         {".sh", "Bash"},
-        {".gs", "Golfscript"}
+        {".gs", "Golfscript"},
+        {".cxx", "C++"},
+        {".kts", "Kotlin"},
+        {".scala", "Scala"},
+        {".php", "PHP"},
+        {".dart", "Dart"},
+        {".lua", "Lua"},
+        {".r", "R"},
+        {".hs", "Haskell"},
+        {".pl", "Perl"},
+        {".jl", "Julia"},
+        {".ml", "OCaml"},
+        {".fs", "F#"},
+        {".vb", "Visual Basic"},
+        {".pas", "Pascal"},
+        {".groovy", "Groovy"},
+        {".clj", "Clojure"},
+        {".ex", "Elixir"},
+        {".erl", "Erlang"},
+        {".d", "D"},
+        {".nim", "Nim"},
+        {".zig", "Zig"},
+        {".f90", "Fortran"},
+        {".asm", "Assembly"}
     };
 
     static inline const std::unordered_set<std::string> PLATFORMS = {

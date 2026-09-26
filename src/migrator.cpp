@@ -291,6 +291,14 @@ public:
 
     static inline std::unordered_map<std::string, std::string> SQL_CACHE;
 
+    // True when a top-level directory is already a language folder ("Python/백준/...").
+    static bool is_language_dir(const std::string& name) {
+        for (const auto& kv : LANGUAGE_EXTENSIONS) {
+            if (kv.second == name) return true;
+        }
+        return false;
+    }
+
     static std::string detect_sql_dialect(const std::string& content) {
         std::string upper_content = to_upper(content);
         std::vector<std::string> oracle_keywords = {
@@ -379,8 +387,13 @@ public:
         }
 
 
+        // A file already inside a language folder keeps it: several languages can share
+        // one problem folder key, and the folder map would pick just one of them.
+        bool in_language_dir = PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() &&
+                               PLATFORMS.find(sub_parts[0]) != PLATFORMS.end() && is_language_dir(top_dir);
+
         // Fallback to folder_lang_map if language isn't directly detected from this file
-        if (detected_lang.empty() && !folder_lang_map.empty() && parts.size() > 1) {
+        if (detected_lang.empty() && !in_language_dir && !folder_lang_map.empty() && parts.size() > 1) {
             std::string problem_key = "";
             if (PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() && PLATFORMS.find(sub_parts[0]) != PLATFORMS.end()) {
                 for (size_t i = 0; i < sub_parts.size() - 1; ++i) {
@@ -802,14 +815,26 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
     // can never diverge from what fast-import will actually end up producing.
     std::unordered_map<std::string, std::set<std::string>> source_destinations;
     std::map<std::string, std::string> live_destinations;
+    // Identical READMEs from different sources may share one destination when the
+    // language folder is dropped (platform_first / flat). dest_owners records every
+    // source currently backing a destination and live_dataref its content.
+    std::map<std::string, std::set<std::string>> dest_owners;
+    std::map<std::string, std::string> live_dataref;
     bool collision_found = false;
     std::string collision_message;
 
-    auto insert_destination = [&](const std::string& dest, const std::string& source) -> bool {
+    auto insert_destination = [&](const std::string& dest, const std::string& source,
+                                  const std::string& dataref, bool mergeable) -> bool {
         auto exact = live_destinations.find(dest);
-        if (exact != live_destinations.end() && exact->second != source) {
-            collision_message = "[-] Destination collision: '" + exact->second + "' and '" + source + "' both map to '" + dest + "'";
-            return false;
+        if (exact != live_destinations.end()) {
+            const auto& owners = dest_owners[dest];
+            bool other_owner = owners.size() > 1 || owners.count(source) == 0;
+            if (other_owner && !(mergeable && live_dataref[dest] == dataref)) {
+                std::string other = exact->second != source ? exact->second : *owners.begin();
+                if (other == source && owners.size() > 1) other = *owners.rbegin();
+                collision_message = "[-] Destination collision: '" + other + "' and '" + source + "' both map to '" + dest + "'";
+                return false;
+            }
         }
         size_t slash = dest.find('/');
         while (slash != std::string::npos) {
@@ -827,6 +852,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
             return false;
         }
         live_destinations[dest] = source;
+        live_dataref[dest] = dataref;
+        dest_owners[dest].insert(source);
         return true;
     };
 
@@ -1049,7 +1076,10 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 // must keep resolving to the same destination(s) recorded when it was
                 // last written, independent of what a since-merged-away branch did to it.
                 std::vector<std::string> new_destinations;
-                if (is_readme && mode == "language_first" && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
+                bool in_language_dir = PathMapper::PLATFORMS.find(top_dir) == PathMapper::PLATFORMS.end() && !sub_parts.empty() &&
+                                       PathMapper::PLATFORMS.find(sub_parts[0]) != PathMapper::PLATFORMS.end() &&
+                                       PathMapper::is_language_dir(top_dir);
+                if (is_readme && mode == "language_first" && !in_language_dir && folder_lang_set_map.count(problem_key) && folder_lang_set_map[problem_key].size() > 1) {
                     for (const auto& lang : folder_lang_set_map[problem_key]) {
                         std::unordered_map<std::string, std::string> single_map;
                         single_map[problem_key] = lang;
@@ -1060,7 +1090,7 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                 }
 
                 for (const auto& new_path : new_destinations) {
-                    if (!insert_destination(new_path, line_item.orig_path)) {
+                    if (!insert_destination(new_path, line_item.orig_path, line_item.dataref, is_readme && mode != "language_first")) {
                         collision_found = true;
                         break;
                     }
@@ -1077,7 +1107,18 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                     continue;
                 }
                 for (const auto& destination : it->second) {
+                    auto owners = dest_owners.find(destination);
+                    if (owners != dest_owners.end()) {
+                        owners->second.erase(line_item.orig_path);
+                        if (!owners->second.empty()) {
+                            // Another source still backs this merged destination.
+                            live_destinations[destination] = *owners->second.begin();
+                            continue;
+                        }
+                        dest_owners.erase(owners);
+                    }
                     live_destinations.erase(destination);
+                    live_dataref.erase(destination);
                     std::string deletion = "D " + escape_path(destination) + "\n";
                     fputs(deletion.c_str(), imp_pipe);
                 }

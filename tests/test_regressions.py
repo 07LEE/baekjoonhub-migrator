@@ -207,6 +207,38 @@ class RegressionTests(unittest.TestCase):
         files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
         self.assertEqual({f.decode() for f in files if f}, expected)
 
+    def setup_two_language_readmes(self, java_readme):
+        self.put('Python/백준/Bronze/1/a.py', 'py')
+        self.put('Python/백준/Bronze/1/README.md', 'doc')
+        self.put('Java/백준/Bronze/1/A.java', 'java')
+        self.put('Java/백준/Bronze/1/README.md', java_readme)
+        self.commit()
+
+    def rewritten_files(self):
+        files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
+        return sorted(f.decode() for f in files if f)
+
+    def test_per_language_readmes_are_kept_in_language_first(self):
+        self.setup_two_language_readmes('doc')
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rewritten_files(), sorted(
+            f'{lang}/백준/Bronze/1/{name}' for lang, name in
+            [('Python', 'a.py'), ('Python', 'README.md'), ('Java', 'A.java'), ('Java', 'README.md')]))
+
+    def test_identical_readmes_are_merged_in_platform_first(self):
+        self.setup_two_language_readmes('doc')
+        result = self.migrate('platform_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.rewritten_files(),
+                         ['백준/Bronze/1/A.java', '백준/Bronze/1/README.md', '백준/Bronze/1/a.py'])
+
+    def test_different_readmes_still_collide_in_platform_first(self):
+        self.setup_two_language_readmes('other doc')
+        head = self.git('rev-parse', 'HEAD')
+        self.assertNotEqual(self.migrate('platform_first').returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
 
 if __name__ == '__main__':
     unittest.main()

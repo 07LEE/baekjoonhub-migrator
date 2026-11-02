@@ -207,6 +207,28 @@ class RegressionTests(unittest.TestCase):
         files = self.git('ls-tree', '-r', '-z', '--name-only', 'HEAD').split(b'\0')
         self.assertEqual({f.decode() for f in files if f}, expected)
 
+    def test_programmers_sql_txt_is_classified_as_sql(self):
+        self.put('프로그래머스/1/1. A/A.txt', 'SELECT * FROM ANIMAL_INS ORDER BY ANIMAL_ID')
+        self.put('프로그래머스/1/1. A/README.md', 'doc')
+        self.put('프로그래머스/2/2. B/B.txt', 'SELECT NVL(NAME, \'No name\') FROM ANIMAL_INS')
+        self.put('프로그래머스/2/3. C/C.txt', 'select name from animal_ins limit 1')
+        self.put('프로그래머스/1/4. D/D.txt', 'not sql')
+        self.put('백준/Bronze/5. E/E.txt', 'SELECT')
+        self.commit()
+        expected = {'MySQL/프로그래머스/1/1. A/A.txt',
+                    'MySQL/프로그래머스/1/1. A/README.md',
+                    'Oracle/프로그래머스/2/2. B/B.txt',
+                    'MySQL/프로그래머스/2/3. C/C.txt',
+                    'Misc/프로그래머스/1/4. D/D.txt',
+                    'Misc/백준/Bronze/5. E/E.txt'}
+        preview = subprocess.run([BINARY, '--repo', str(self.repo), '--mode', 'language_first', '--dry-run'],
+                                 capture_output=True, text=True, timeout=30).stdout
+        for path in expected:
+            self.assertIn('-> ' + path, preview)
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(set(self.rewritten_files()), expected)
+
     def setup_two_language_readmes(self, java_readme):
         self.put('Python/백준/Bronze/1/a.py', 'py')
         self.put('Python/백준/Bronze/1/README.md', 'doc')

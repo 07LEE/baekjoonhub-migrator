@@ -229,6 +229,22 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(set(self.rewritten_files()), expected)
 
+    def test_baekjoonhub_extensions_get_language_folders(self):
+        self.put('백준/Bronze/1. A/A.m', 'objc')
+        self.put('백준/Bronze/2. B/B.f', 'fortran')
+        self.put('goormlevel/1/3. C/C.lisp', 'lisp')
+        self.put('goormlevel/1/4. D/D.cob', 'cobol')
+        self.put('백준/Bronze/5. E/E.bf', 'befunge or brainf**k')
+        self.commit()
+        result = self.migrate('language_first')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(set(self.rewritten_files()), {
+            'Objective-C/백준/Bronze/1. A/A.m',
+            'Fortran/백준/Bronze/2. B/B.f',
+            'Common Lisp/goormlevel/1/3. C/C.lisp',
+            'Cobol/goormlevel/1/4. D/D.cob',
+            'Misc/백준/Bronze/5. E/E.bf'})
+
     def setup_two_language_readmes(self, java_readme):
         self.put('Python/백준/Bronze/1/a.py', 'py')
         self.put('Python/백준/Bronze/1/README.md', 'doc')

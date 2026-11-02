@@ -282,7 +282,40 @@ public:
         {".nim", "Nim"},
         {".zig", "Zig"},
         {".f90", "Fortran"},
-        {".asm", "Assembly"}
+        {".asm", "Assembly"},
+        // Extensions BaekjoonHub itself writes (baekjoon/goormlevel variables.js).
+        // Left out on purpose: ".txt" (also the unknown-language fallback) and
+        // ".bf" (shared by Befunge and Brainf**k).
+        {".m", "Objective-C"},
+        {".mm", "Objective-C++"},
+        {".cob", "Cobol"},
+        {".st", "Smalltalk"},
+        {".lisp", "Common Lisp"},
+        {".scm", "Scheme"},
+        {".ada", "Ada"},
+        {".awk", "awk"},
+        {".cr", "Crystal"},
+        {".f", "Fortran"},
+        {".o", "Assembly"},
+        {".tcl", "Tcl"},
+        {".pyx", "Cython"},
+        {".v", "Coq"},
+        {".sv", "SystemVerilog"},
+        {".ws", "Whitespace"},
+        {".boo", "Boo"},
+        {".bas", "FreeBASIC"},
+        {".bc", "bc"},
+        {".sed", "sed"},
+        {".pike", "Pike"},
+        {".cobra", "Cobra"},
+        {".a", "Algol 68"},
+        {".i", "INTERCAL"},
+        {".n", "Nemerle"},
+        {".lol", "LOLCODE"},
+        {".ape", "APECODE"},
+        {".aheui", "아희"},
+        {".umm", "엄준식"},
+        {".mca", "Minecraft"}
     };
 
     static inline const std::unordered_set<std::string> PLATFORMS = {

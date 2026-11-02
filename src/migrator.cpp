@@ -282,7 +282,40 @@ public:
         {".nim", "Nim"},
         {".zig", "Zig"},
         {".f90", "Fortran"},
-        {".asm", "Assembly"}
+        {".asm", "Assembly"},
+        // Extensions BaekjoonHub itself writes (baekjoon/goormlevel variables.js).
+        // Left out on purpose: ".txt" (also the unknown-language fallback) and
+        // ".bf" (shared by Befunge and Brainf**k).
+        {".m", "Objective-C"},
+        {".mm", "Objective-C++"},
+        {".cob", "Cobol"},
+        {".st", "Smalltalk"},
+        {".lisp", "Common Lisp"},
+        {".scm", "Scheme"},
+        {".ada", "Ada"},
+        {".awk", "awk"},
+        {".cr", "Crystal"},
+        {".f", "Fortran"},
+        {".o", "Assembly"},
+        {".tcl", "Tcl"},
+        {".pyx", "Cython"},
+        {".v", "Coq"},
+        {".sv", "SystemVerilog"},
+        {".ws", "Whitespace"},
+        {".boo", "Boo"},
+        {".bas", "FreeBASIC"},
+        {".bc", "bc"},
+        {".sed", "sed"},
+        {".pike", "Pike"},
+        {".cobra", "Cobra"},
+        {".a", "Algol 68"},
+        {".i", "INTERCAL"},
+        {".n", "Nemerle"},
+        {".lol", "LOLCODE"},
+        {".ape", "APECODE"},
+        {".aheui", "아희"},
+        {".umm", "엄준식"},
+        {".mca", "Minecraft"}
     };
 
     static inline const std::unordered_set<std::string> PLATFORMS = {
@@ -319,6 +352,39 @@ public:
             if (std::regex_search(upper_content, re)) return "MySQL";
         }
         return "";
+    }
+
+    static inline std::unordered_map<std::string, std::string> PROGRAMMERS_TXT_CACHE;
+
+    // BaekjoonHub saves Programmers SQL answers as "<title>.txt" since 2026-09-11 (ddfd5b4),
+    // because the SQL editor tab label has no dot. Treat such a file as SQL only when it is
+    // under 프로그래머스 and its content has a SELECT; "" means it is not SQL.
+    // An unknown dialect falls back like ".sql" does: the existing language folder, else MySQL.
+    static std::string programmers_txt_language(
+        const std::string& top_dir,
+        const std::vector<std::string>& sub_parts,
+        const std::string& blob_sha,
+        const std::function<std::string(const std::string&)>& content_getter
+    ) {
+        bool case_a = PLATFORMS.find(top_dir) == PLATFORMS.end() && !sub_parts.empty() && sub_parts[0] == "프로그래머스";
+        if (!case_a && top_dir != "프로그래머스") return "";
+        if (blob_sha.empty() || !content_getter) return "";
+
+        auto cached = PROGRAMMERS_TXT_CACHE.find(blob_sha);
+        if (cached != PROGRAMMERS_TXT_CACHE.end()) return cached->second;
+
+        std::string lang = "";
+        try {
+            std::string upper_content = to_upper(content_getter(blob_sha));
+            if (std::regex_search(upper_content, std::regex("\\bSELECT\\b"))) {
+                lang = detect_sql_dialect(upper_content);
+                if (lang.empty()) lang = case_a ? top_dir : "MySQL";
+            }
+        } catch (...) {
+            lang = "";
+        }
+        PROGRAMMERS_TXT_CACHE[blob_sha] = lang;
+        return lang;
     }
 
     static std::string transform_path(
@@ -378,6 +444,8 @@ public:
                 if (!blob_sha.empty()) {
                     SQL_CACHE[blob_sha] = detected_lang;
                 }
+            } else if (ext == ".txt") {
+                detected_lang = programmers_txt_language(top_dir, sub_parts, blob_sha, content_getter);
             } else {
                 auto it = LANGUAGE_EXTENSIONS.find(ext);
                 if (it != LANGUAGE_EXTENSIONS.end()) {
@@ -610,6 +678,8 @@ std::unordered_map<std::string, std::string> build_folder_lang_map(
             } else {
                 lang = "MySQL";
             }
+        } else if (ext == ".txt") {
+            lang = PathMapper::programmers_txt_language(top_dir, sub_parts, blob_sha, content_getter);
         } else {
             auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
             if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {
@@ -950,6 +1020,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                         l_found = "MySQL";
                     }
                 }
+            } else if (ext == ".txt") {
+                l_found = PathMapper::programmers_txt_language(top_dir, sub_parts, sha, content_getter_pre);
             } else {
                 auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
                 if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) l_found = it->second;
@@ -1029,6 +1101,8 @@ bool execute_rewrite(const std::string& repo_dir, const std::string& mode) {
                                     l_found = "MySQL";
                                 }
                             }
+                        } else if (ext == ".txt") {
+                            l_found = PathMapper::programmers_txt_language(top_dir, sub_parts, line_item.dataref, content_getter);
                         } else {
                             auto it = PathMapper::LANGUAGE_EXTENSIONS.find(ext);
                             if (it != PathMapper::LANGUAGE_EXTENSIONS.end()) {

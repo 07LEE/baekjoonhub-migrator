@@ -12,7 +12,7 @@ It reorganizes file paths while preserving commit timestamps, author metadata, a
    - Retains original submission timestamps (`Author Date`, `Committer Date`), author details, and commit messages.
 
 2. Flexible Directory Layouts
-   - Platform-first: `백준/...`, `프로그래머스/...`, `SWEA/...`, `정올/...`
+   - Platform-first: `백준/...`, `프로그래머스/...`, `SWEA/...`, `정올/...`, `DOJ/...`
    - Language-first: `Python/백준/...`, `Java/프로그래머스/...`
    - Flat: `백준/...` (Platform-focused flat layout)
 

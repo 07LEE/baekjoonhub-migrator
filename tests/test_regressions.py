@@ -267,6 +267,28 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(set(self.rewritten_files()), files)
 
+    def test_doj_paths_are_recognized(self):
+        # BaekjoonHub v1.7.0 uploads DOJ solutions to DOJ/<tier>/<id>. <title>/, and
+        # its "text" language to Text/DOJ/... as .txt.
+        self.put('DOJ/Gold/1. A/A.rs', 'rust')
+        self.put('DOJ/Gold/1. A/README.md', 'doc')
+        self.put('Python/DOJ/Bronze/2. B/B.py', 'py')
+        self.put('Text/DOJ/Silver/3. C/C.txt', 'text')
+        self.commit()
+        expected = {
+            'platform_first': {'DOJ/Gold/1. A/A.rs', 'DOJ/Gold/1. A/README.md',
+                               'DOJ/Bronze/2. B/B.py', 'DOJ/Silver/3. C/C.txt'},
+            'language_first': {'Rust/DOJ/Gold/1. A/A.rs', 'Rust/DOJ/Gold/1. A/README.md',
+                               'Python/DOJ/Bronze/2. B/B.py', 'Text/DOJ/Silver/3. C/C.txt'},
+        }
+        original = self.git('rev-parse', 'HEAD').decode().strip()
+        for mode, files in expected.items():
+            with self.subTest(mode=mode):
+                self.git('reset', '-q', '--hard', original)
+                result = self.migrate(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(set(self.rewritten_files()), files)
+
     def setup_two_language_readmes(self, java_readme):
         self.put('Python/백준/Bronze/1/a.py', 'py')
         self.put('Python/백준/Bronze/1/README.md', 'doc')

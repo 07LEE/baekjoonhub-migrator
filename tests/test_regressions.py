@@ -245,6 +245,28 @@ class RegressionTests(unittest.TestCase):
             'Cobol/goormlevel/1/4. D/D.cob',
             'Misc/백준/Bronze/5. E/E.bf'})
 
+    def test_jungol_paths_are_recognized(self):
+        # BaekjoonHub v1.6.0 uploads 정올 solutions to 정올/<tier>/<id>. <title>/, and
+        # languages it has no folder for to <code>/정올/... as .txt.
+        self.put('정올/Gold/1. A/A.cpp', 'cpp')
+        self.put('정올/Gold/1. A/README.md', 'doc')
+        self.put('Python/정올/Bronze/2. B/B.py', 'py')
+        self.put('SWIFT/정올/Silver/3. C/C.txt', 'swift')
+        self.commit()
+        expected = {
+            'platform_first': {'정올/Gold/1. A/A.cpp', '정올/Gold/1. A/README.md',
+                               '정올/Bronze/2. B/B.py', '정올/Silver/3. C/C.txt'},
+            'language_first': {'C++/정올/Gold/1. A/A.cpp', 'C++/정올/Gold/1. A/README.md',
+                               'Python/정올/Bronze/2. B/B.py', 'SWIFT/정올/Silver/3. C/C.txt'},
+        }
+        original = self.git('rev-parse', 'HEAD').decode().strip()
+        for mode, files in expected.items():
+            with self.subTest(mode=mode):
+                self.git('reset', '-q', '--hard', original)
+                result = self.migrate(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(set(self.rewritten_files()), files)
+
     def setup_two_language_readmes(self, java_readme):
         self.put('Python/백준/Bronze/1/a.py', 'py')
         self.put('Python/백준/Bronze/1/README.md', 'doc')

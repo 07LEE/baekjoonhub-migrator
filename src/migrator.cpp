@@ -319,7 +319,7 @@ public:
     };
 
     static inline const std::unordered_set<std::string> PLATFORMS = {
-        "백준", "프로그래머스", "SWEA", "goormlevel", "LEETCODE"
+        "백준", "프로그래머스", "SWEA", "goormlevel", "LEETCODE", "정올"
     };
 
     static inline std::unordered_map<std::string, std::string> SQL_CACHE;
